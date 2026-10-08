@@ -1,0 +1,31 @@
+{
+  "name": "code-review-workflow",
+  "description": "编码 → 审查 → (不通过则)修复 → 再审查 的循环工作流",
+  "start": "coder",
+  "nodes": [
+    {
+      "id": "coder",
+      "agent": "coder",
+      "input": {"requirement": "requirement"},
+      "output": "code"
+    },
+    {
+      "id": "reviewer",
+      "agent": "reviewer",
+      "input": {"code": "code"},
+      "output": "review"
+    },
+    {
+      "id": "fixer",
+      "agent": "fixer",
+      "input": {"code": "code", "review": "review"},
+      "output": "code"
+    }
+  ],
+  "edges": [
+    {"from": "coder", "to": "reviewer"},
+    {"from": "reviewer", "to": "END", "when": "state['review']['passed']"},
+    {"from": "reviewer", "to": "fixer", "when": "not state['review']['passed']"},
+    {"from": "fixer", "to": "reviewer"}
+  ]
+}
