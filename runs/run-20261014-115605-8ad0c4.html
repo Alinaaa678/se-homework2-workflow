@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Workflow 运行回放 — 20261014-115605-8ad0c4</title>
+<style>
+  body { font-family: "Microsoft YaHei", system-ui, sans-serif; margin: 0; background: #f6f7f9; color: #222; }
+  header { background: #1f2937; color: #fff; padding: 18px 28px; }
+  header h1 { font-size: 20px; margin: 0 0 6px; }
+  header .meta { font-size: 13px; opacity: .85; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 13px; margin-left: 8px; }
+  .success { background: #16a34a; } .failed { background: #dc2626; }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px; }
+  section { background: #fff; border-radius: 10px; padding: 18px 22px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  h2 { font-size: 16px; margin: 0 0 12px; border-left: 4px solid #2563eb; padding-left: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #e5e7eb; padding: 6px 10px; text-align: left; }
+  th { background: #f3f4f6; }
+  tr.err td { background: #fef2f2; }
+  code, pre { font-family: Consolas, monospace; font-size: 12.5px; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; overflow: auto; max-height: 320px; }
+  details { margin-bottom: 10px; }
+  summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+  .node-box { fill: #fff; stroke: #2563eb; stroke-width: 1.5; rx: 8; }
+  .node-parallel { stroke: #9333ea; }
+  .node-text { font-size: 12px; font-family: inherit; }
+  .edge { stroke: #9ca3af; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }
+  .edge-back { stroke-dasharray: 5 4; }
+  .edge-label { font-size: 10.5px; fill: #6b7280; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Workflow 运行回放 <span class="badge success">success</span></h1>
+  <div class="meta">流程：code-review-workflow-parallel ｜ 运行 ID：20261014-115605-8ad0c4 ｜ 步数：2 ｜ 消息数：6</div>
+</header>
+<main>
+  <section><h2>流程图（节点上标注执行次数）</h2><div id="diagram"></div></section>
+  <section><h2>步骤时间线</h2><div id="steps"></div></section>
+  <section><h2>Agent 间消息记录</h2><div id="messages"></div></section>
+  <section><h2>最终产物</h2><div id="artifacts"></div></section>
+</main>
+<script>
+const FLOW = {"name": "code-review-workflow-parallel", "description": "编码 → 并行双路审查（正确性+风格）→ (任一不通过则)修复 → 再审查", "start": "coder", "nodes": [{"id": "coder", "agent": "coder", "input": {"requirement": "requirement"}, "output": "code"}, {"id": "reviews", "type": "parallel", "tasks": [{"id": "correctness", "agent": "reviewer_correctness", "input": {"code": "code"}, "output": "review_correctness"}, {"id": "style", "agent": "reviewer_style", "input": {"code": "code"}, "output": "review_style"}], "reduce": "merge_reviews", "output": "review"}, {"id": "fixer", "agent": "fixer", "input": {"code": "code", "review": "review"}, "output": "code"}], "edges": [{"from": "coder", "to": "reviews"}, {"from": "reviews", "to": "END", "when": "state['review']['passed']"}, {"from": "reviews", "to": "fixer", "when": "not state['review']['passed']"}, {"from": "fixer", "to": "reviews"}]};
+const EVENTS = [{"event": "run_start", "run_id": "20261014-115605-8ad0c4", "flow": "code-review-workflow-parallel", "flow_def": {"name": "code-review-workflow-parallel", "description": "编码 → 并行双路审查（正确性+风格）→ (任一不通过则)修复 → 再审查", "start": "coder", "nodes": [{"id": "coder", "agent": "coder", "input": {"requirement": "requirement"}, "output": "code"}, {"id": "reviews", "type": "parallel", "tasks": [{"id": "correctness", "agent": "reviewer_correctness", "input": {"code": "code"}, "output": "review_correctness"}, {"id": "style", "agent": "reviewer_style", "input": {"code": "code"}, "output": "review_style"}], "reduce": "merge_reviews", "output": "review"}, {"id": "fixer", "agent": "fixer", "input": {"code": "code", "review": "review"}, "output": "code"}], "edges": [{"from": "coder", "to": "reviews"}, {"from": "reviews", "to": "END", "when": "state['review']['passed']"}, {"from": "reviews", "to": "fixer", "when": "not state['review']['passed']"}, {"from": "fixer", "to": "reviews"}]}, "ts": 1791950165.3635807}, {"event": "step", "run_id": "20261014-115605-8ad0c4", "node": "coder", "agent": "coder", "visit": 1, "ts": 1791950165.3645854, "duration_ms": 5247, "status": "ok", "output_key": "code"}, {"event": "message", "ts": 1791950165.365, "from": "START", "to": "coder", "kind": "handoff", "payload": {"requirement": "实现一个命令行待办事项（Todo）管理模块，要求：\n\n1. 支持添加任务（标题 + 优先级 high/medium/low，默认 medium）\n2. 支持完成任务（按编号标记 done）\n3. 支持列出任务（未完成的排前面，同状态按优先级…"}}, {"event": "message", "ts": 1791950170.611, "from": "coder", "to": "coder", "kind": "artifact", "payload": {"code": "from dataclasses import dataclass, field\nfrom typing import List, Optional\n\n\nPRIORITY_ORDER = {\"high\": 0, \"medium\": 1, \"…"}}, {"event": "step", "run_id": "20261014-115605-8ad0c4", "node": "reviews", "agent": "parallel", "visit": 1, "ts": 1791950170.6114345, "tasks": [{"task": "correctness", "agent": "reviewer_correctness", "duration_ms": 1049, "output_key": "review_correctness"}, {"task": "style", "agent": "reviewer_style", "duration_ms": 3387, "output_key": "review_style"}], "duration_ms": 3391, "status": "ok", "output_key": "review"}, {"event": "message", "ts": 1791950170.611, "from": "coder", "to": "reviews", "kind": "handoff", "payload": {"code": "from dataclasses import dataclass, field\nfrom typing import List, Optional\n\n\nPRIORITY_ORDER = {\"high\": 0, \"medium\": 1, \"…"}}, {"event": "message", "ts": 1791950171.663, "from": "reviews", "to": "reviews", "kind": "artifact", "payload": {"review_correctness": "{\"passed\": true, \"issues\": [], \"summary\": \"代码逻辑正确，边界条件与异常处理完善，实际运行结果与代码意图完全一致。\", \"run_result\": \"[exit_code=0]\\n[成功] 已添加任…"}}, {"event": "message", "ts": 1791950174.001, "from": "reviews", "to": "reviews", "kind": "artifact", "payload": {"review_style": "{\"passed\": true, \"issues\": [{\"severity\": \"low\", \"desc\": \"Magic Number：list_tasks 中排序键使用 99 作为未知优先级的兜底值，建议提取为命名常量（如 UNKNO…"}}, {"event": "message", "ts": 1791950174.002, "from": "reviews", "to": "reviews", "kind": "artifact", "payload": {"review": "{\"passed\": true, \"issues\": [{\"severity\": \"low\", \"desc\": \"Magic Number：list_tasks 中排序键使用 99 作为未知优先级的兜底值，建议提取为命名常量（如 UNKNO…"}}, {"event": "run_end", "run_id": "20261014-115605-8ad0c4", "ts": 1791950174.002151, "status": "success", "error": null, "keys": ["code", "requirement", "review", "review_correctness", "review_style"], "message_count": 6}];
+const ARTIFACTS = {"code": "from dataclasses import dataclass, field\nfrom typing import List, Optional\n\n\nPRIORITY_ORDER = {\"high\": 0, \"medium\": 1, \"low\": 2}\nVALID_PRIORITIES = set(PRIORITY_ORDER.keys())\n\n\n@dataclass\nclass Task:\n    id: int\n    title: str\n    priority: str = \"medium\"\n    done: bool = False\n\n\nclass TodoManager:\n    def __init__(self) -> None:\n        self._tasks: List[Task] = []\n        self._next_id: int = 1\n\n    def add(self, title: str, priority: str = \"medium\") -> Optional[Task]:\n        title = (title or \"\").strip()\n        if not title:\n            print(\"[错误] 任务标题不能为空。\")\n            return None\n\n        priority = (priority or \"\").strip().lower()\n        if priority not in VALID_PRIORITIES:\n            print(f\"[错误] 非法优先级 '{priority}'，可选值：high / medium / low。\")\n            return None\n\n        task = Task(id=self._next_id, title=title, priority=priority)\n        self._tasks.append(task)\n        self._next_id += 1\n        print(f\"[成功] 已添加任务 #{task.id}：{task.title}（优先级：{task.priority}）\")\n        return task\n\n    def complete(self, task_id: int) -> bool:\n        try:\n            task_id = int(task_id)\n        except (TypeError, ValueError):\n            print(f\"[错误] 非法编号 '{task_id}'，请输入整数编号。\")\n            return False\n\n        for task in self._tasks:\n            if task.id == task_id:\n                if task.done:\n                    print(f\"[提示] 任务 #{task_id} 已经是完成状态。\")\n                    return False\n                task.done = True\n                print(f\"[成功] 已完成任务 #{task.id}：{task.title}\")\n                return True\n\n        print(f\"[错误] 找不到编号为 {task_id} 的任务。\")\n        return False\n\n    def list_tasks(self) -> List[Task]:\n        sorted_tasks = sorted(\n            self._tasks,\n            key=lambda t: (t.done, PRIORITY_ORDER.get(t.priority, 99), t.id),\n        )\n        if not sorted_tasks:\n            print(\"[提示] 当前没有任务。\")\n            return sorted_tasks\n\n        print(\"---- 任务列表 ----\")\n        for task in sorted_tasks:\n            status = \"✔\" if task.done else \" \"\n            print(f\"[{status}] #{task.id} ({task.priority}) {task.title}\")\n        print(\"------------------\")\n        return sorted_tasks\n\n\nif __name__ == \"__main__\":\n    todo = TodoManager()\n\n    # 正常添加\n    todo.add(\"写周报\", \"high\")\n    todo.add(\"买牛奶\")  # 默认 medium\n    todo.add(\"整理桌面\", \"low\")\n    todo.add(\"准备会议材料\", \"high\")\n\n    # 非法输入演示\n    todo.add(\"\", \"high\")          # 空标题\n    todo.add(\"   \", \"low\")        # 空白标题\n    todo.add(\"测试任务\", \"urgent\")  # 非法优先级\n\n    # 完成任务\n    todo.complete(2)\n    todo.complete(2)      # 重复完成\n    todo.complete(999)    # 不存在的编号\n    todo.complete(\"abc\")  # 非整数编号\n\n    # 列出任务\n    todo.list_tasks()", "review": {"passed": true, "issues": [{"severity": "low", "desc": "Magic Number：list_tasks 中排序键使用 99 作为未知优先级的兜底值，建议提取为命名常量（如 UNKNOWN_PRIORITY_RANK）以表达意图。", "source": "style"}, {"severity": "low", "desc": "重复代码：add/complete/list_tasks 中大量使用 print 输出提示信息，且格式（如 '[错误]'、'[成功]'）散落各处，建议抽取统一的输出/日志辅助方法或常量前缀。", "source": "style"}, {"severity": "low", "desc": "接口设计不一致：add 返回 Optional[Task]，complete 返回 bool，list_tasks 返回 List[Task]，同时都通过 print 输出副作用，返回值与副作用混用，调用方难以统一处理。", "source": "style"}, {"severity": "low", "desc": "命名可读性：complete 方法名暗示完成动作，但内部承担了参数校验、查找、状态判断等多重职责，且对'已完成'和'找不到'都返回 False，语义不够清晰。", "source": "style"}, {"severity": "low", "desc": "缺少文档字符串：TodoManager 及其公开方法（add/complete/list_tasks）均无 docstring，未说明参数、返回值及副作用（print）。", "source": "style"}, {"severity": "low", "desc": "注释质量：__main__ 中的注释（如'正常添加'、'非法输入演示'）仅描述显而易见的行为，未提供额外信息。", "source": "style"}, {"severity": "low", "desc": "函数长度：list_tasks 同时负责排序、空判断、打印列表和返回结果，职责偏多，可拆分排序与渲染逻辑。", "source": "style"}], "summary": "[correctness] 代码逻辑正确，边界条件与异常处理完善，实际运行结果与代码意图完全一致。；[style] ", "run_result": "[exit_code=0]\n[成功] 已添加任务 #1：写周报（优先级：high）\n[成功] 已添加任务 #2：买牛奶（优先级：medium）\n[成功] 已添加任务 #3：整理桌面（优先级：low）\n[成功] 已添加任务 #4：准备会议材料（优先级：high）\n[错误] 任务标题不能为空。\n[错误] 任务标题不能为空。\n[错误] 非法优先级 'urgent'，可选值：high / medium / low。\n[成功] 已完成任务 #2：买牛奶\n[提示] 任务 #2 已经是完成状态。\n[错误] 找不到编号为 999 的任务。\n[错误] 非法编号 'abc'，请输入整数编号。\n---- 任务列表 ----\n[ ] #1 (high) 写周报\n[ ] #4 (high) 准备会议材料\n[ ] #3 (low) 整理桌面\n[✔] #2 (medium) 买牛奶\n------------------"}};
+
+// ---- layered layout: BFS from start, back-edges drawn dashed ----
+const nodes = FLOW.nodes, edges = FLOW.edges || [];
+const depth = {[FLOW.start]: 0};
+let frontier = [FLOW.start];
+while (frontier.length) {
+  const next = [];
+  for (const id of frontier) {
+    for (const e of edges) {
+      if (e.from !== id || e.to === "END") continue;
+      if (depth[e.to] === undefined) { depth[e.to] = depth[id] + 1; next.push(e.to); }
+    }
+  }
+  frontier = next;
+}
+nodes.forEach(n => { if (depth[n.id] === undefined) depth[n.id] = 0; });
+const layers = {};
+nodes.forEach(n => { (layers[depth[n.id]] = layers[depth[n.id]] || []).push(n.id); });
+const maxDepth = Math.max(...Object.values(depth));
+const pos = {};
+Object.entries(layers).forEach(([d, ids]) => ids.forEach((id, i) => pos[id] = { x: 80 + d * 260, y: 60 + i * 110 }));
+if (edges.some(e => e.to === "END")) pos.END = { x: 80 + (maxDepth + 1) * 260, y: 60 };
+const visits = {};
+EVENTS.filter(e => e.event === "step").forEach(e => visits[e.node] = Math.max(visits[e.node] || 0, e.visit));
+
+const W = 200, H = 54;
+function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+let svg = `<svg width="${80 + (maxDepth + 2) * 260}" height="${Math.max(1, ...Object.keys(layers).map(d => layers[d].length)) * 110 + 80}">
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#9ca3af"/></marker></defs>`;
+for (const e of edges) {
+  const a = pos[e.from], b = pos[e.to];
+  if (!a || !b) continue;
+  const x1 = a.x + W, y1 = a.y + H / 2, x2 = b.x, y2 = b.y + (e.to === "END" ? 15 : H / 2);
+  const back = e.to !== "END" && depth[e.to] <= depth[e.from];
+  const path = back
+    ? `M${a.x + W / 2},${a.y + H} C${a.x + W / 2},${a.y + H + 45} ${b.x + W / 2},${b.y + H + 45} ${b.x + W / 2},${b.y + H}`
+    : `M${x1},${y1} C${x1 + 60},${y1} ${x2 - 60},${y2} ${x2},${y2}`;
+  svg += `<path class="edge ${back ? "edge-back" : ""}" d="${path}"/>`;
+  if (e.when) svg += `<text class="edge-label" x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 6}">${esc(e.when)}</text>`;
+}
+for (const n of nodes) {
+  const p = pos[n.id], isPar = n.type === "parallel";
+  const sub = isPar ? "并行: " + n.tasks.map(t => t.agent).join(" + ") : (n.agent || "");
+  const v = visits[n.id] ? ` ×${visits[n.id]}` : "";
+  svg += `<rect class="node-box ${isPar ? "node-parallel" : ""}" x="${p.x}" y="${p.y}" width="${W}" height="${H}" rx="8"/>
+  <text class="node-text" x="${p.x + W / 2}" y="${p.y + 24}" text-anchor="middle" font-weight="700">${esc(n.id)}${v}</text>
+  <text class="node-text" x="${p.x + W / 2}" y="${p.y + 42}" text-anchor="middle" fill="#6b7280">${esc(sub)}</text>`;
+}
+if (pos.END) svg += `<circle cx="${pos.END.x + 15}" cy="${pos.END.y + 15}" r="16" fill="#16a34a"/><text x="${pos.END.x + 15}" y="${pos.END.y + 19}" text-anchor="middle" fill="#fff" font-size="10" font-weight="700">END</text>`;
+svg += "</svg>";
+document.getElementById("diagram").innerHTML = svg;
+
+// ---- steps timeline ----
+const steps = EVENTS.filter(e => e.event === "step");
+let rows = steps.map(s => {
+  const taskDetail = (s.tasks || []).map(t => `${esc(t.task)}(${esc(t.agent)}) ${t.duration_ms}ms`).join("<br>");
+  return `<tr class="${s.status === "ok" ? "" : "err"}"><td>${s.node}</td><td>${s.visit}</td><td>${s.agent}</td>
+    <td>${s.duration_ms ?? "-"}ms${taskDetail ? "<br>" + taskDetail : ""}</td>
+    <td>${s.status === "ok" ? "✅ " + esc(String(s.output_key)) : "❌ " + esc(s.error || "")}</td></tr>`;
+}).join("");
+document.getElementById("steps").innerHTML =
+  `<table><tr><th>节点</th><th>第几次执行</th><th>Agent</th><th>耗时</th><th>结果</th></tr>${rows}</table>`;
+
+// ---- messages ----
+const msgs = EVENTS.filter(e => e.event === "message");
+document.getElementById("messages").innerHTML =
+  `<table><tr><th>#</th><th>从</th><th>到</th><th>类型</th><th>内容摘要</th></tr>` +
+  msgs.map((m, i) => `<tr><td>${i + 1}</td><td>${esc(m.from)}</td><td>${esc(m.to)}</td><td>${esc(m.kind)}</td><td><code>${esc(m.payload)}</code></td></tr>`).join("") +
+  "</table>";
+
+// ---- artifacts ----
+let art = "";
+if (ARTIFACTS.review) {
+  const r = ARTIFACTS.review;
+  art += `<details open><summary>审查结论：${r.passed ? "✅ 通过" : "❌ 未通过"}</summary>
+    <p>${esc(r.summary || "")}</p>
+    <table><tr><th>级别</th><th>来源</th><th>问题</th></tr>` +
+    (r.issues || []).map(i => `<tr><td>${esc(i.severity || "")}</td><td>${esc(i.source || "")}</td><td>${esc(i.desc || "")}</td></tr>`).join("") +
+    "</table></details>";
+}
+if (ARTIFACTS.code) art += `<details><summary>最终代码（点击展开）</summary><pre>${esc(ARTIFACTS.code)}</pre></details>`;
+document.getElementById("artifacts").innerHTML = art || "<p>（无产物，运行未成功）</p>";
+</script>
+</body>
+</html>

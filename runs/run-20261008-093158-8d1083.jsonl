@@ -1,0 +1,4 @@
+{"event": "run_start", "run_id": "20261008-093158-8d1083", "flow": "code-review-workflow", "ts": 1791423118.4827926}
+{"event": "step", "run_id": "20261008-093158-8d1083", "node": "coder", "agent": "coder", "visit": 1, "ts": 1791423118.4828525, "duration_ms": 3975, "status": "ok", "output_key": "code"}
+{"event": "step", "run_id": "20261008-093158-8d1083", "node": "reviewer", "agent": "reviewer", "visit": 1, "ts": 1791423122.4577882, "duration_ms": 1481, "status": "ok", "output_key": "review"}
+{"event": "run_end", "run_id": "20261008-093158-8d1083", "ts": 1791423123.938587, "status": "success", "error": null, "keys": ["code", "requirement", "review"], "message_count": 4}

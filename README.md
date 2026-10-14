@@ -1,35 +1,37 @@
 # Simple Workflow MVP — 软件工程 Homework 2
 
-一个**多 Agent 协作工作流**：`编码 Agent → 审查 Agent → 修复 Agent` 组成
-「编码 → 审查 → （不通过则）修复 → 再审查」的循环流程，端到端地把一句
-自然语言需求变成一份通过审查、可直接运行的 Python 代码。
+一个**多 Agent 协作工作流**：`编码 Agent → 并行双路审查（正确性 + 风格）→ （任一不通过则）修复 → 再审查`，
+端到端地把一句自然语言需求变成一份通过审查、可直接运行的 Python 代码。
 
 ## 流程图
 
 ```mermaid
 flowchart TD
     coder[coder 编码Agent]
-    reviewer[reviewer 审查Agent]
+    reviews[reviews 并行审查: 正确性 + 风格]
     fixer[fixer 修复Agent]
-    coder --> reviewer
-    reviewer -->|passed| END((END))
-    reviewer -->|not passed| fixer
-    fixer --> reviewer
+    coder --> reviews
+    reviews -->|passed| END((END))
+    reviews -->|not passed| fixer
+    fixer --> reviews
 ```
 
-（在支持 Mermaid 的 Markdown 阅读器中可直接渲染；`python main.py --viz` 会打印上图源码）
+（`python main.py --viz` 打印上图源码；`python main.py` 运行后还会在 `runs/` 生成
+**自包含 HTML 回放页**——流程图、步骤时间线、消息记录、最终产物，浏览器打开即可，无需联网）
 
 ## 对照作业要求
 
 | 要求 | 实现 |
 |---|---|
-| 至少 2 个 Agent 协作 | 3 个：CoderAgent / ReviewAgent / FixAgent |
-| Agent 间消息传递或状态共享 | 两者都有：共享黑板 `WorkflowState.data` + 每次交接记录为消息信封（`state.messages`） |
-| 顺序执行流程控制 | 声明式 JSON 流程定义（`flows/code_review.json`），引擎按边推进 |
-| 条件分支、循环（推荐） | 边可带 `when` 条件表达式；`fixer → reviewer` 回边构成修复-复审循环 |
-| 执行日志与状态追踪（推荐） | 每步写入 `runs/run-*.jsonl`（节点、耗时、状态、错误），运行结束写汇总 |
+| 至少 2 个 Agent 协作 | 4 个：Coder / CorrectnessReviewer / StyleReviewer / Fixer |
+| Agent 间消息传递或状态共享 | 两者都有：共享黑板 `WorkflowState.data` + 每次交接记录为消息信封（并写入 JSONL 日志） |
+| 顺序执行流程控制 | 声明式 JSON 流程定义（`flows/`），引擎按边推进 |
+| 条件分支、循环（推荐） | 边可带 `when` 条件表达式；`fixer → reviews` 回边构成修复-复审循环 |
+| **并行执行**（推荐） | 并行 stage：正确性审查与风格审查**并发执行**（fork/join 融合为一个节点），`merge_reviews` reducer 汇合双路结论；实测总耗时 ≈ 较慢一路而非两路之和 |
+| **可视化编排**（推荐，可选） | `runs/run-*.html` 离线回放页：SVG 流程图（标注执行次数）+ 步骤时间线（含并行任务耗时明细）+ 消息记录 + 产物查看；`--replay` 可对历史日志重新生成 |
+| 执行日志与状态追踪（推荐） | 每步写入 `runs/run-*.jsonl`（节点、耗时、状态、错误、并行任务明细），消息亦全量落盘 |
 | 错误处理与恢复（推荐） | 节点失败自动重试；LLM 调用指数退避；循环有步数/访问上限，超限优雅中止 |
-| 复用项目 1（推荐） | `workflow/llm.py` 直接复用作业 1 的 ChatClient；`workflow/tools.py` 复用「运行代码验证 bug」的思路，审查 Agent 会**真实执行**被审代码再下结论 |
+| 复用项目 1（推荐） | `workflow/llm.py` 复用作业 1 的 ChatClient；`workflow/tools.py` 复用「运行代码验证」思路，正确性审查 Agent 会**真实执行**被审代码 |
 
 ## 快速开始
 
@@ -37,51 +39,54 @@ flowchart TD
 # 1. 配置（与作业 1 相同）
 cp config.example.json config.json   # 填入 base_url / api_key / model
 
-# 2. 端到端运行（默认使用 samples/requirement.md）
+# 2. 端到端运行（默认并行流程 + samples/requirement.md）
 python main.py
 
-# 3. 换自己的需求
+# 3. 换需求 / 换流程
 python main.py --requirement my_requirement.md
+python main.py --flow flows/code_review.json   # 顺序版流程（单审查员）
 
-# 4. 查看流程图（Mermaid）
-python main.py --viz
+# 4. 流程图与回放
+python main.py --viz                            # Mermaid 源码
+python main.py --replay runs/run-XXXX.jsonl     # 历史日志 → HTML 回放页
 
 # 5. 离线演示 / 自测（无需 API Key）
 python main.py --demo
-python tests/test_workflow.py
+python tests/test_workflow.py                   # 16 项测试
 ```
 
 零第三方依赖，Python 3.9+ 即可运行。
 
-## 一次真实运行记录
+## 一次真实运行记录（并行版）
 
 ```
-流程: code-review-workflow — 编码 → 审查 → (不通过则)修复 → 再审查 的循环工作流
-  [step] coder (visit 1) -> code  3619ms
-  [step] reviewer (visit 1) -> review  1250ms
+流程: code-review-workflow-parallel
+  [step] coder (visit 1) -> code  5247ms
+  [step] reviews (visit 1) -> review  3391ms
+      └─ 并行 correctness(reviewer_correctness) 1049ms
+      └─ 并行 style(reviewer_style) 3387ms      ← 总耗时≈较慢一路，确为并发
 状态: success
-审查结论: ✅ 通过 —— 代码逻辑正确，边界与异常处理完善，输出与预期一致
-最终代码已写入: output/final_code.py
+审查结论: ✅ 通过（正确性无问题；风格给出 7 条 low 级建议，均标注来源 [style]）
+最终代码已写入: output/final_code.py（实测运行，5 项需求全部符合）
 ```
-
-产物 `output/final_code.py` 是一个命令行 Todo 管理模块，实际运行验证了
-添加/完成/排序/非法输入处理全部符合需求。
 
 ## 项目结构
 
 ```
-├── main.py               # CLI 入口（run / --viz / --demo）
+├── main.py               # CLI 入口（run / --flow / --viz / --replay / --demo）
 ├── workflow/
-│   ├── engine.py         # 工作流引擎：声明式 DAG + 条件边 + 循环守卫 + JSONL 日志
+│   ├── engine.py         # 工作流引擎：声明式 DAG + 条件边 + 并行 stage + 循环守卫 + JSONL 日志
 │   ├── state.py          # 共享状态：黑板 + Agent 消息日志
-│   ├── agents.py         # 三个 Agent（提示词 + 结构化输出解析）
+│   ├── agents.py         # 4 个 Agent + merge_reviews reducer
 │   ├── llm.py            # OpenAI 兼容客户端（复用自作业 1，含重试）
-│   └── tools.py          # 沙箱执行工具（复用自作业 1，审查时真实跑代码）
+│   ├── tools.py          # 沙箱执行工具（复用自作业 1，审查时真实跑代码）
+│   └── viz.py            # 离线 HTML 回放页生成器（纯 SVG/JS，无外部依赖）
 ├── flows/
-│   └── code_review.json  # 流程定义：节点 + 条件边（改流程不用改代码）
+│   ├── code_review_parallel.json  # 默认流程：并行双路审查
+│   └── code_review.json           # 顺序版流程（单审查员，用于对照）
 ├── samples/requirement.md# 示例需求
-├── tests/test_workflow.py# 离线测试：FakeLLM 驱动完整流程（9 个用例）
-└── runs/                 # 每次运行的 JSONL 执行日志
+├── tests/test_workflow.py# 离线测试：16 项（解析器/reducer/顺序流/并行流/回放页）
+└── runs/                 # 每次运行的 JSONL 日志 + HTML 回放页
 ```
 
 设计取舍与扩展方法见 [Design.md](Design.md)。

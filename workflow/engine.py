@@ -26,6 +26,7 @@ import json
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional
 
 from .state import WorkflowState
@@ -70,6 +71,7 @@ class WorkflowEngine:
         node_retries: int = 1,
         log_dir: str = "runs",
         on_step: Optional[Callable[[Dict[str, Any]], None]] = None,
+        reducers: Optional[Dict[str, Callable[[Dict[str, Any]], Any]]] = None,
     ) -> None:
         self.flow = flow
         self.agents = agents
@@ -78,6 +80,7 @@ class WorkflowEngine:
         self.node_retries = node_retries
         self.log_dir = log_dir
         self.on_step = on_step  # UI callback, keeps the engine print-free
+        self.reducers = reducers or {}
         self._validate()
 
     # ------------------------------------------------------------------ #
@@ -91,12 +94,34 @@ class WorkflowEngine:
         if self.flow.get("start") not in node_ids:
             raise FlowError(f"start 节点 {self.flow.get('start')!r} 不存在")
         for n in self.flow.get("nodes", []):
-            if n["agent"] not in self.agents:
+            if n.get("type") == "parallel":
+                self._validate_parallel(n)
+            elif n["agent"] not in self.agents:
                 raise FlowError(f"节点 {n['id']!r} 引用了未注册的 Agent {n['agent']!r}")
         for e in self.flow.get("edges", []):
             for key in ("from", "to"):
                 if e[key] != END and e[key] not in node_ids:
                     raise FlowError(f"边引用了不存在的节点: {e}")
+
+    def _validate_parallel(self, node: Dict[str, Any]) -> None:
+        tasks = node.get("tasks") or []
+        if len(tasks) < 2:
+            raise FlowError(f"并行节点 {node['id']!r} 至少需要 2 个任务")
+        outputs = [t.get("output") for t in tasks]
+        if len(set(outputs)) != len(outputs):
+            raise FlowError(
+                f"并行节点 {node['id']!r} 的任务输出键必须互不相同（避免黑板写冲突）: {outputs}"
+            )
+        for t in tasks:
+            if t.get("agent") not in self.agents:
+                raise FlowError(f"并行任务 {t.get('id')!r} 引用了未注册的 Agent {t.get('agent')!r}")
+            if not t.get("output"):
+                raise FlowError(f"并行任务 {t.get('id')!r} 缺少 output 键")
+        if node.get("reduce"):
+            if node["reduce"] not in self.reducers:
+                raise FlowError(f"并行节点 {node['id']!r} 引用了未注册的 reducer {node['reduce']!r}")
+            if not node.get("output"):
+                raise FlowError(f"并行节点 {node['id']!r} 使用 reduce 时必须声明 output 键")
 
     # ------------------------------------------------------------------ #
     def _resolve_inputs(self, node: Dict[str, Any], state: WorkflowState) -> Dict[str, Any]:
@@ -133,8 +158,9 @@ class WorkflowEngine:
         with open(log_path, "w", encoding="utf-8") as log:
             log.write(json.dumps({
                 "event": "run_start", "run_id": run_id,
-                "flow": self.flow.get("name"), "ts": time.time(),
+                "flow": self.flow.get("name"), "flow_def": self.flow, "ts": time.time(),
             }, ensure_ascii=False) + "\n")
+            msg_cursor = 0  # messages already flushed into the log
 
             while current != END:
                 if len(visits) and sum(visits.values()) >= self.max_steps:
@@ -150,36 +176,41 @@ class WorkflowEngine:
                     break
 
                 node = next(n for n in self.flow["nodes"] if n["id"] == current)
-                agent = self.agents[node["agent"]]
+                is_parallel = node.get("type") == "parallel"
                 step: Dict[str, Any] = {
                     "event": "step", "run_id": run_id, "node": current,
-                    "agent": node["agent"], "visit": visits[current],
+                    "agent": "parallel" if is_parallel else node["agent"],
+                    "visit": visits[current],
                     "ts": time.time(),
                 }
 
                 try:
-                    inputs = self._resolve_inputs(node, state)
-                    state.post_message(prev, current, "handoff",
-                                       {k: _brief(v) for k, v in inputs.items()})
                     start = time.time()
-                    output = self._call_with_retry(agent, inputs)
+                    if is_parallel:
+                        output = self._run_parallel_node(node, state, prev, step)
+                    else:
+                        output = self._run_agent_node(node, state, prev)
                     step["duration_ms"] = round((time.time() - start) * 1000)
-                    state.set(node["output"], output)
-                    state.post_message(current, current, "artifact",
-                                       {node["output"]: _brief(output)})
                     step["status"] = "ok"
-                    step["output_key"] = node["output"]
+                    step["output_key"] = node.get("output") or [
+                        t["output"] for t in node.get("tasks", [])
+                    ]
                 except Exception as e:  # node failure -> graceful stop
                     state.status = "failed"
                     state.error = f"节点 {current!r} 失败: {e}"
                     step["status"] = "error"
                     step["error"] = str(e)
                     log.write(json.dumps(step, ensure_ascii=False) + "\n")
+                    for m in state.messages[msg_cursor:]:
+                        log.write(json.dumps({"event": "message", **m}, ensure_ascii=False) + "\n")
                     if self.on_step:
                         self.on_step(step)
                     break
 
                 log.write(json.dumps(step, ensure_ascii=False) + "\n")
+                for m in state.messages[msg_cursor:]:
+                    log.write(json.dumps({"event": "message", **m}, ensure_ascii=False) + "\n")
+                msg_cursor = len(state.messages)
                 if self.on_step:
                     self.on_step(step)
                 prev, current = current, self._next_node(current, state)
@@ -193,6 +224,68 @@ class WorkflowEngine:
 
         state.data["_run_log"] = log_path
         return state
+
+    def _run_agent_node(self, node: Dict[str, Any], state: WorkflowState, prev: str) -> Any:
+        """Execute a regular single-agent node."""
+        inputs = self._resolve_inputs(node, state)
+        state.post_message(prev, node["id"], "handoff",
+                           {k: _brief(v) for k, v in inputs.items()})
+        output = self._call_with_retry(self.agents[node["agent"]], inputs)
+        state.set(node["output"], output)
+        state.post_message(node["id"], node["id"], "artifact",
+                           {node["output"]: _brief(output)})
+        return output
+
+    def _run_parallel_node(
+        self, node: Dict[str, Any], state: WorkflowState, prev: str, step: Dict[str, Any]
+    ) -> Any:
+        """Execute a parallel stage: fork -> run tasks concurrently -> join -> reduce.
+
+        Fork/join is fused into one node on purpose: every task reads the same
+        inputs snapshot and writes its own distinct output key (enforced by
+        ``_validate_parallel``), so the blackboard needs no locks and the join
+        is just "wait for all futures". Reducers then merge per-task outputs
+        into the node's single ``output`` key for downstream nodes.
+        """
+        tasks = node["tasks"]
+        # Snapshot inputs for the handoff message (all tasks share them).
+        sample_inputs = self._resolve_inputs(tasks[0], state)
+        state.post_message(prev, node["id"], "handoff",
+                           {k: _brief(v) for k, v in sample_inputs.items()})
+
+        def work(task: Dict[str, Any]) -> Dict[str, Any]:
+            inputs = self._resolve_inputs(task, state)
+            started = time.time()
+            result = self._call_with_retry(self.agents[task["agent"]], inputs)
+            return {
+                "task": task, "result": result,
+                "duration_ms": round((time.time() - started) * 1000),
+            }
+
+        results: Dict[str, Any] = {}
+        step["tasks"] = []
+        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+            futures = [pool.submit(work, t) for t in tasks]
+            for fut in as_completed(futures):
+                done = fut.result()  # raises if the task ultimately failed
+                task, output = done["task"], done["result"]
+                results[task["id"]] = output
+                # join: each task writes its own key, main thread only
+                state.set(task["output"], output)
+                state.post_message(node["id"], node["id"], "artifact",
+                                   {task["output"]: _brief(output)})
+                step["tasks"].append({
+                    "task": task["id"], "agent": task["agent"],
+                    "duration_ms": done["duration_ms"], "output_key": task["output"],
+                })
+
+        if node.get("reduce"):
+            reduced = self.reducers[node["reduce"]](results)
+            state.set(node["output"], reduced)
+            state.post_message(node["id"], node["id"], "artifact",
+                               {node["output"]: _brief(reduced)})
+            return reduced
+        return results
 
     def _call_with_retry(self, agent: Any, inputs: Dict[str, Any]) -> Any:
         last: Optional[Exception] = None
@@ -209,7 +302,13 @@ class WorkflowEngine:
     def to_mermaid(self) -> str:
         """Render the flow definition as a Mermaid diagram."""
         lines = ["flowchart TD"]
-        labels = {n["id"]: f"{n['id']}({n['agent']})" for n in self.flow["nodes"]}
+        labels = {}
+        for n in self.flow["nodes"]:
+            if n.get("type") == "parallel":
+                names = "+".join(t["agent"] for t in n["tasks"])
+                labels[n["id"]] = f"{n['id']} 并行({names})"
+            else:
+                labels[n["id"]] = f"{n['id']}({n['agent']})"
         for nid, label in labels.items():
             lines.append(f"    {nid}[{label}]")
         for e in self.flow["edges"]:

@@ -74,8 +74,8 @@ class CoderAgent:
         return extract_code(resp["choices"][0]["message"]["content"] or "")
 
 
-class ReviewAgent:
-    """Reviews code: actually executes it, then asks the LLM for a verdict.
+class CorrectnessReviewAgent:
+    """Reviews code correctness: actually executes it, then asks the LLM.
 
     Output schema::
 
@@ -84,10 +84,10 @@ class ReviewAgent:
          "summary": str}
     """
 
-    name = "reviewer"
+    name = "reviewer_correctness"
     SYSTEM = (
-        "你是一名严格的代码审查员。你会拿到一段代码和它的实际运行结果。"
-        "从正确性、健壮性（边界条件/异常处理）、可读性三方面审查。"
+        "你是一名严格的代码正确性审查员。你会拿到一段代码和它的实际运行结果。"
+        "只关注正确性与健壮性：逻辑错误、边界条件、异常处理、运行结果是否符合代码意图。"
         "只输出一个 JSON 对象，格式："
         '{"passed": true/false, "issues": [{"severity": "high|medium|low", '
         '"desc": "问题描述"}], "summary": "一句话总结"}。'
@@ -122,6 +122,69 @@ class ReviewAgent:
         review.setdefault("summary", "")
         review["run_result"] = run_result[:500]
         return review
+
+
+class StyleReviewAgent:
+    """Reviews code style only (naming, structure, readability) — no execution.
+
+    Runs in parallel with CorrectnessReviewAgent; same output schema so the
+    merge_reviews reducer can combine both verdicts.
+    """
+
+    name = "reviewer_style"
+    SYSTEM = (
+        "你是一名严格的代码风格审查员。只关注可读性与工程规范：命名、函数长度、"
+        "重复代码、注释与文档字符串、Magic Number、接口设计一致性。"
+        "不要评价功能正确性（另有专人负责）。"
+        "只输出一个 JSON 对象，格式："
+        '{"passed": true/false, "issues": [{"severity": "high|medium|low", '
+        '"desc": "问题描述"}], "summary": "一句话总结"}。'
+        "只有 high/medium 级风格问题才判 false；小问题记入 issues 但 passed 可为 true。"
+        "不要输出 JSON 以外的任何内容。"
+    )
+
+    def __init__(self, client: ChatClient) -> None:
+        self.client = client
+
+    def run(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        code = inputs["code"]
+        resp = self.client.chat(
+            [
+                {"role": "system", "content": self.SYSTEM},
+                {"role": "user", "content": f"待审查代码：\n```python\n{code}\n```"},
+            ]
+        )
+        review = extract_json(resp["choices"][0]["message"]["content"] or "")
+        review.setdefault("passed", False)
+        review.setdefault("issues", [])
+        review.setdefault("summary", "")
+        return review
+
+
+# Backward-compatible alias: the original sequential flow uses "reviewer".
+ReviewAgent = CorrectnessReviewAgent
+
+
+def merge_reviews(outputs: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Reducer for the parallel review stage: merge per-reviewer verdicts.
+
+    passed = 全体通过才通过；issues 合并并标注来源；summary 汇总各审查员结论。
+    """
+    passed = all(o.get("passed", False) for o in outputs.values())
+    issues: List[Dict[str, Any]] = []
+    for source, review in outputs.items():
+        for issue in review.get("issues", []):
+            issues.append({**issue, "source": source})
+    summary = "；".join(
+        f"[{source}] {review.get('summary', '')}" for source, review in outputs.items()
+    )
+    merged: Dict[str, Any] = {"passed": passed, "issues": issues, "summary": summary}
+    # Preserve the execution evidence collected by the correctness reviewer.
+    for review in outputs.values():
+        if review.get("run_result"):
+            merged["run_result"] = review["run_result"]
+            break
+    return merged
 
 
 class FixAgent:
@@ -160,8 +223,17 @@ class FixAgent:
 
 # Registry: flow definitions refer to agents by these names.
 def default_registry(client: ChatClient) -> Dict[str, Any]:
+    correctness = CorrectnessReviewAgent(client)
     return {
         "coder": CoderAgent(client),
-        "reviewer": ReviewAgent(client),
+        "reviewer": correctness,  # alias，兼容顺序版流程
+        "reviewer_correctness": correctness,
+        "reviewer_style": StyleReviewAgent(client),
         "fixer": FixAgent(client),
     }
+
+
+# Reducer registry: parallel nodes refer to reducers by these names.
+REDUCERS = {
+    "merge_reviews": merge_reviews,
+}

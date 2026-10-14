@@ -1,0 +1,45 @@
+{
+  "name": "code-review-workflow-parallel",
+  "description": "编码 → 并行双路审查（正确性+风格）→ (任一不通过则)修复 → 再审查",
+  "start": "coder",
+  "nodes": [
+    {
+      "id": "coder",
+      "agent": "coder",
+      "input": {"requirement": "requirement"},
+      "output": "code"
+    },
+    {
+      "id": "reviews",
+      "type": "parallel",
+      "tasks": [
+        {
+          "id": "correctness",
+          "agent": "reviewer_correctness",
+          "input": {"code": "code"},
+          "output": "review_correctness"
+        },
+        {
+          "id": "style",
+          "agent": "reviewer_style",
+          "input": {"code": "code"},
+          "output": "review_style"
+        }
+      ],
+      "reduce": "merge_reviews",
+      "output": "review"
+    },
+    {
+      "id": "fixer",
+      "agent": "fixer",
+      "input": {"code": "code", "review": "review"},
+      "output": "code"
+    }
+  ],
+  "edges": [
+    {"from": "coder", "to": "reviews"},
+    {"from": "reviews", "to": "END", "when": "state['review']['passed']"},
+    {"from": "reviews", "to": "fixer", "when": "not state['review']['passed']"},
+    {"from": "fixer", "to": "reviews"}
+  ]
+}
