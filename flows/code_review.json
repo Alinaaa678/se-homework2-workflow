@@ -12,13 +12,13 @@
     {
       "id": "reviewer",
       "agent": "reviewer",
-      "input": {"code": "code"},
+      "input": {"code": "code", "requirement": "requirement"},
       "output": "review"
     },
     {
       "id": "fixer",
       "agent": "fixer",
-      "input": {"code": "code", "review": "review"},
+      "input": {"code": "code", "review": "review", "requirement": "requirement"},
       "output": "code"
     }
   ],

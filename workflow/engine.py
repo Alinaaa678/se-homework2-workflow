@@ -211,9 +211,39 @@ class WorkflowEngine:
                 for m in state.messages[msg_cursor:]:
                     log.write(json.dumps({"event": "message", **m}, ensure_ascii=False) + "\n")
                 msg_cursor = len(state.messages)
+
+                # Messages are compact handoff summaries; artifact events keep
+                # the complete value for every visit so replays can reconstruct
+                # final outputs and inspect each repair iteration.
+                if is_parallel:
+                    artifact_items = [
+                        (task["output"], state.get(task["output"]))
+                        for task in node.get("tasks", [])
+                    ]
+                    if node.get("reduce"):
+                        artifact_items.append((node["output"], output))
+                else:
+                    artifact_items = [(node["output"], output)]
+                for key, value in artifact_items:
+                    log.write(json.dumps({
+                        "event": "artifact", "run_id": run_id,
+                        "node": current, "visit": visits[current],
+                        "key": key, "value": value, "ts": time.time(),
+                    }, ensure_ascii=False) + "\n")
+
                 if self.on_step:
                     self.on_step(step)
-                prev, current = current, self._next_node(current, state)
+                try:
+                    next_node = self._next_node(current, state)
+                except Exception as e:  # routing failure -> graceful stop
+                    state.status = "failed"
+                    state.error = f"节点 {current!r} 的出边求值失败: {e}"
+                    log.write(json.dumps({
+                        "event": "route_error", "run_id": run_id,
+                        "node": current, "error": str(e), "ts": time.time(),
+                    }, ensure_ascii=False) + "\n")
+                    break
+                prev, current = current, next_node
 
             if state.status == "running":
                 state.status = "success"

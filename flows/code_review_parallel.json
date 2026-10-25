@@ -16,7 +16,7 @@
         {
           "id": "correctness",
           "agent": "reviewer_correctness",
-          "input": {"code": "code"},
+          "input": {"code": "code", "requirement": "requirement"},
           "output": "review_correctness"
         },
         {
@@ -32,7 +32,7 @@
     {
       "id": "fixer",
       "agent": "fixer",
-      "input": {"code": "code", "review": "review"},
+      "input": {"code": "code", "review": "review", "requirement": "requirement"},
       "output": "code"
     }
   ],

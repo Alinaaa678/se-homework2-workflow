@@ -1,24 +1,33 @@
-"""Sandboxed Python execution tool, reused from Homework 1.
+"""Time-boxed Python subprocess tool, reused from Homework 1.
 
-The ReviewAgent uses it to actually *run* the candidate code before
-judging it — the same "verify by executing" idea as Homework 1's
-``run_python`` tool, kept dependency-free and time-boxed.
+The ReviewAgent uses it to execute candidate code before judging it. This is
+not a security sandbox; its purpose is reproducible evidence collection.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
-import os
+from typing import Dict
+
+
+def _scrub_sensitive_env(env: Dict[str, str]) -> Dict[str, str]:
+    """Remove credentials before executing model-generated code."""
+    markers = ("API_KEY", "SECRET", "PASSWORD", "TOKEN", "CREDENTIAL")
+    return {
+        key: value for key, value in env.items()
+        if not any(marker in key.upper() for marker in markers)
+    }
 
 
 def run_python(code: str, timeout: int = 10) -> str:
-    """Execute *code* in an isolated subprocess; return stdout+stderr.
+    """Execute *code* in a temporary subprocess; return stdout+stderr.
 
-    The code runs in a temp directory with a hard timeout. Output is
-    truncated to 4000 chars so a runaway print loop can't flood the
-    agent context.
+    This is process isolation with a timeout, not a security sandbox: the
+    candidate can still access the filesystem and network. Sensitive
+    environment variables are removed, and output is truncated to 4000 chars.
     """
     with tempfile.TemporaryDirectory(prefix="wf_run_") as tmp:
         script = os.path.join(tmp, "candidate.py")
@@ -26,7 +35,8 @@ def run_python(code: str, timeout: int = 10) -> str:
             f.write(code)
         # Force UTF-8 on both ends: Chinese Windows defaults to GBK and
         # would otherwise crash the reader thread on non-GBK bytes.
-        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        env = _scrub_sensitive_env(dict(os.environ))
+        env["PYTHONIOENCODING"] = "utf-8"
         try:
             proc = subprocess.run(
                 [sys.executable, script],

@@ -54,6 +54,7 @@ TEMPLATE = """<!DOCTYPE html>
   <section><h2>流程图（节点上标注执行次数）</h2><div id="diagram"></div></section>
   <section><h2>步骤时间线</h2><div id="steps"></div></section>
   <section><h2>Agent 间消息记录</h2><div id="messages"></div></section>
+  <section><h2>工件版本记录（完整内容）</h2><div id="artifact-history"></div></section>
   <section><h2>最终产物</h2><div id="artifacts"></div></section>
 </main>
 <script>
@@ -130,7 +131,14 @@ document.getElementById("messages").innerHTML =
   msgs.map((m, i) => `<tr><td>${i + 1}</td><td>${esc(m.from)}</td><td>${esc(m.to)}</td><td>${esc(m.kind)}</td><td><code>${esc(m.payload)}</code></td></tr>`).join("") +
   "</table>";
 
-// ---- artifacts ----
+// ---- complete artifact versions, including every repair iteration ----
+const artifactEvents = EVENTS.filter(e => e.event === "artifact");
+document.getElementById("artifact-history").innerHTML = artifactEvents.map((a, i) => {
+  const value = typeof a.value === "string" ? a.value : JSON.stringify(a.value, null, 2);
+  return `<details><summary>#${i + 1} ${esc(a.node)} · 第${a.visit}次执行 · ${esc(a.key)}</summary><pre>${esc(value)}</pre></details>`;
+}).join("") || "<p>（该日志没有完整工件事件；请使用新版流程重新运行）</p>";
+
+// ---- final artifacts ----
 let art = "";
 if (ARTIFACTS.review) {
   const r = ARTIFACTS.review;
@@ -146,6 +154,15 @@ document.getElementById("artifacts").innerHTML = art || "<p>（无产物，运�
 </body>
 </html>
 """
+
+
+def artifacts_from_events(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Reconstruct the latest value of every artifact from a run log."""
+    artifacts: Dict[str, Any] = {}
+    for event in events:
+        if event.get("event") == "artifact":
+            artifacts[event["key"]] = event.get("value")
+    return artifacts
 
 
 def render_replay(

@@ -19,7 +19,7 @@ import sys
 from workflow.agents import REDUCERS, default_registry
 from workflow.engine import WorkflowEngine
 from workflow.llm import load_client
-from workflow.viz import render_replay, replay_path_for
+from workflow.viz import artifacts_from_events, render_replay, replay_path_for
 
 DEFAULT_FLOW = "flows/code_review_parallel.json"
 # viz only needs the flow definition; agents are never invoked
@@ -89,7 +89,8 @@ def run_workflow(requirement_path: str, flow_path: str, demo: bool = False) -> i
         print(f"可视化回放: {replay}（浏览器打开即可）")
 
     if state.status == "success" and state.get("code"):
-        out_path = "output/final_code.py"
+        # Offline demo output must not overwrite the real submitted artifact.
+        out_path = "output/demo_code.py" if demo else "output/final_code.py"
         os.makedirs("output", exist_ok=True)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(state.get("code") + "\n")
@@ -106,7 +107,7 @@ def replay_run(log_path: str) -> int:
         print("该日志不含流程定义，无法回放（请用本次升级后生成的日志）", file=sys.stderr)
         return 1
     out = replay_path_for(log_path)
-    render_replay(flow, events, {}, out)
+    render_replay(flow, events, artifacts_from_events(events), out)
     print(f"可视化回放: {out}（浏览器打开即可）")
     return 0
 

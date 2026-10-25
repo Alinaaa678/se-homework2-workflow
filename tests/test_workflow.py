@@ -234,7 +234,8 @@ class TestParallelWorkflow(unittest.TestCase):
         self.assertGreaterEqual(client.review_calls, 2)
 
     def test_parallel_validation(self):
-        base = json.load(open(PAR_FLOW, encoding="utf-8"))
+        with open(PAR_FLOW, encoding="utf-8") as f:
+            base = json.load(f)
         # 输出键冲突
         dup = json.loads(json.dumps(base))
         dup["nodes"][1]["tasks"][1]["output"] = "review_correctness"
@@ -273,7 +274,8 @@ class TestViz(unittest.TestCase):
             render_replay(engine.flow, events,
                           {"code": state.get("code"), "review": state.get("review")},
                           out)
-            page = open(out, encoding="utf-8").read()
+            with open(out, encoding="utf-8") as f:
+                page = f.read()
             self.assertIn("<svg", page)          # 流程图
             self.assertIn("reviews", page)       # 并行节点
             self.assertIn("运行回放", page)

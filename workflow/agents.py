@@ -47,6 +47,51 @@ def extract_json(text: str) -> Dict[str, Any]:
     return json.loads(cleaned[start : end + 1])
 
 
+VALID_SEVERITIES = {"high", "medium", "low"}
+BLOCKING_SEVERITIES = {"high", "medium"}
+
+
+def normalize_review(review: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate an LLM review and derive its verdict from blocking issues.
+
+    The model-reported ``passed`` flag is checked for type but is not trusted
+    as the final decision. This keeps contradictory replies such as a medium
+    issue with ``passed=true`` from incorrectly ending the workflow.
+    """
+    if not isinstance(review, dict):
+        raise ValueError("审查结果必须是 JSON 对象")
+    if "passed" not in review or type(review["passed"]) is not bool:
+        raise ValueError("审查结果缺少布尔字段 passed")
+    if not isinstance(review.get("issues"), list):
+        raise ValueError("审查结果缺少数组字段 issues")
+    if not isinstance(review.get("summary"), str):
+        raise ValueError("审查结果缺少字符串字段 summary")
+
+    normalized_issues: List[Dict[str, str]] = []
+    for issue in review["issues"]:
+        if not isinstance(issue, dict):
+            raise ValueError("审查问题必须是 JSON 对象")
+        severity = issue.get("severity")
+        desc = issue.get("desc")
+        if severity not in VALID_SEVERITIES:
+            raise ValueError(f"非法问题级别: {severity!r}")
+        if not isinstance(desc, str) or not desc.strip():
+            raise ValueError("审查问题缺少非空描述 desc")
+        normalized_issues.append({"severity": severity, "desc": desc.strip()})
+
+    has_blocking_issue = any(
+        issue["severity"] in BLOCKING_SEVERITIES
+        for issue in normalized_issues
+    )
+    return {
+        # A blocking issue always forces failure; a model-reported failure
+        # without an itemized issue remains a conservative failure as well.
+        "passed": review["passed"] and not has_blocking_issue,
+        "issues": normalized_issues,
+        "summary": review["summary"],
+    }
+
+
 # ---------------------------------------------------------------------- #
 # agents
 # ---------------------------------------------------------------------- #
@@ -86,13 +131,14 @@ class CorrectnessReviewAgent:
 
     name = "reviewer_correctness"
     SYSTEM = (
-        "你是一名严格的代码正确性审查员。你会拿到一段代码和它的实际运行结果。"
-        "只关注正确性与健壮性：逻辑错误、边界条件、异常处理、运行结果是否符合代码意图。"
+        "你是一名严格的代码正确性审查员。你会拿到原始需求、代码和实际运行结果。"
+        "逐项对照原始需求，检查功能完整性、逻辑错误、边界条件和异常处理；"
+        "不能仅凭程序没有崩溃就判定满足需求。"
         "只输出一个 JSON 对象，格式："
         '{"passed": true/false, "issues": [{"severity": "high|medium|low", '
-        '"desc": "问题描述"}], "summary": "一句话总结"}。'
-        "存在 high 级问题时 passed 必须为 false；没有问题时 issues 为空数组且 passed 为 true。"
-        "不要输出 JSON 以外的任何内容。"
+        '"desc": "问题描述及对应需求"}], "summary": "一句话总结"}。'
+        "存在 high/medium 级问题时 passed 必须为 false；"
+        "没有问题时 issues 为空数组且 passed 为 true。不要输出 JSON 以外的任何内容。"
     )
 
     def __init__(self, client: ChatClient, exec_timeout: int = 10) -> None:
@@ -101,7 +147,8 @@ class CorrectnessReviewAgent:
 
     def run(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         code = inputs["code"]
-        # Reuse Homework 1's "verify by executing" idea.
+        requirement = inputs["requirement"]
+        # Execution supplies evidence; the original requirement supplies the oracle.
         run_result = run_python(code, timeout=self.exec_timeout)
         resp = self.client.chat(
             [
@@ -109,17 +156,16 @@ class CorrectnessReviewAgent:
                 {
                     "role": "user",
                     "content": (
+                        f"原始需求：\n{requirement}\n\n"
                         f"待审查代码：\n```python\n{code}\n```\n\n"
                         f"实际运行结果：\n{run_result}"
                     ),
                 },
             ]
         )
-        review = extract_json(resp["choices"][0]["message"]["content"] or "")
-        # Normalise the schema so downstream nodes can rely on it.
-        review.setdefault("passed", False)
-        review.setdefault("issues", [])
-        review.setdefault("summary", "")
+        review = normalize_review(
+            extract_json(resp["choices"][0]["message"]["content"] or "")
+        )
         review["run_result"] = run_result[:500]
         return review
 
@@ -154,11 +200,9 @@ class StyleReviewAgent:
                 {"role": "user", "content": f"待审查代码：\n```python\n{code}\n```"},
             ]
         )
-        review = extract_json(resp["choices"][0]["message"]["content"] or "")
-        review.setdefault("passed", False)
-        review.setdefault("issues", [])
-        review.setdefault("summary", "")
-        return review
+        return normalize_review(
+            extract_json(resp["choices"][0]["message"]["content"] or "")
+        )
 
 
 # Backward-compatible alias: the original sequential flow uses "reviewer".
@@ -166,21 +210,25 @@ ReviewAgent = CorrectnessReviewAgent
 
 
 def merge_reviews(outputs: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """Reducer for the parallel review stage: merge per-reviewer verdicts.
-
-    passed = 全体通过才通过；issues 合并并标注来源；summary 汇总各审查员结论。
-    """
-    passed = all(o.get("passed", False) for o in outputs.values())
+    """Validate and merge reviews; any high/medium issue blocks success."""
+    normalized = {
+        source: normalize_review(review)
+        for source, review in sorted(outputs.items())
+    }
     issues: List[Dict[str, Any]] = []
-    for source, review in outputs.items():
-        for issue in review.get("issues", []):
+    for source, review in normalized.items():
+        for issue in review["issues"]:
             issues.append({**issue, "source": source})
-    summary = "；".join(
-        f"[{source}] {review.get('summary', '')}" for source, review in outputs.items()
-    )
-    merged: Dict[str, Any] = {"passed": passed, "issues": issues, "summary": summary}
-    # Preserve the execution evidence collected by the correctness reviewer.
-    for review in outputs.values():
+    merged: Dict[str, Any] = {
+        "passed": all(review["passed"] for review in normalized.values()),
+        "issues": issues,
+        "summary": "；".join(
+            f"[{source}] {review['summary']}"
+            for source, review in normalized.items()
+        ),
+    }
+    # Preserve execution evidence, which normalize_review intentionally omits.
+    for source, review in sorted(outputs.items()):
         if review.get("run_result"):
             merged["run_result"] = review["run_result"]
             break
@@ -202,6 +250,7 @@ class FixAgent:
 
     def run(self, inputs: Dict[str, Any]) -> str:
         code = inputs["code"]
+        requirement = inputs["requirement"]
         issues: List[Dict[str, Any]] = inputs["review"].get("issues", [])
         issue_text = "\n".join(
             f"- [{i.get('severity', '?')}] {i.get('desc', '')}" for i in issues
@@ -212,6 +261,7 @@ class FixAgent:
                 {
                     "role": "user",
                     "content": (
+                        f"原始需求（修复后仍须完整满足）：\n{requirement}\n\n"
                         f"原始代码：\n```python\n{code}\n```\n\n"
                         f"审查意见：\n{issue_text}"
                     ),
