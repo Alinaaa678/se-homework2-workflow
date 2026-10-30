@@ -178,3 +178,31 @@ parallel    并行双审 Workflow
 3. SQLite 是本地持久化方案，不是分布式工作流服务。
 4. 并行粒度是 stage 内 fork/join，尚不支持任意子图分叉汇合。
 5. 系统记录副作用幂等标识，但不保证外部副作用自动去重。
+
+## 12. 真实模型端到端验证（2026-10-30）
+
+使用默认 Todo 需求和并行双审流程执行了一次真实模型运行。该运行不使用 FakeLLM，完整经过规格、编码、并行审查、独立验收、证据判定和修复节点。
+
+| 项目 | 结果 |
+|---|---|
+| 运行 ID | `20261030-113043-6317a7` |
+| 最终状态 | `success / completed_verified` |
+| 修复过程 | 首轮验收未通过，修复 1 次后重新审查并验收通过 |
+| 节点访问 | `coder` 1 次、`reviews` 2 次、`acceptance` 2 次、`fixer` 1 次 |
+| 模型调用 | 成功 8 次，重试 0 次 |
+| Token | prompt 8,353；completion 7,228；合计 15,581 |
+| 节点累计耗时 | 30.703 秒 |
+| 内部独立验收 | 通过，退出码 0 |
+| 外部隐藏测试 | `evals/tasks/todo/hidden_tests.py` 通过 |
+| 生成代码直接执行 | `output/final_code.py` 正常运行，功能演示符合需求 |
+
+最终证据门禁的 `review_passed`、`acceptance_passed`、`review_current`、`acceptance_current` 和 `spec_current` 五项均为真。外部复核通过 `evals.verify.verify_code` 对真实生成代码重新运行隐藏测试，而不是沿用工作流自评结果。
+
+本地证据文件：
+
+- `runs/run-20261030-113043-6317a7.jsonl`：完整事件日志；
+- `runs/run-20261030-113043-6317a7.html`：可视化回放；
+- `runs/workflow.db`：检查点与最终证据；
+- `output/final_code.py`：通过验收的生成代码。
+
+复现入口为 `python main.py`；已有本地检查点可通过 `python main.py --inspect 20261030-113043-6317a7` 查看。运行产物和真实密钥不提交 Git。本次结果证明默认示例的真实模型链路可运行，但不构成对其他需求或模型质量的统计性保证。
