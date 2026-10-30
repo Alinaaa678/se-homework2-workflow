@@ -1,8 +1,9 @@
-from dataclasses import dataclass, field
+"""Reference Todo implementation used by acceptance and external-eval tests."""
+from dataclasses import dataclass
 from typing import List, Optional
 
 PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
-VALID_PRIORITIES = set(PRIORITY_ORDER.keys())
+VALID_PRIORITIES = set(PRIORITY_ORDER)
 
 
 @dataclass
@@ -47,41 +48,38 @@ class TodoManager:
         return True
 
     def _find(self, task_id: int) -> Optional[Task]:
-        for t in self._tasks:
-            if t.id == task_id:
-                return t
+        for task in self._tasks:
+            if task.id == task_id:
+                return task
         return None
 
     def list_tasks(self) -> List[Task]:
         ordered = sorted(
             self._tasks,
-            key=lambda t: (t.done, PRIORITY_ORDER.get(t.priority, 99), t.id),
+            key=lambda task: (task.done, PRIORITY_ORDER.get(task.priority, 99), task.id),
         )
         if not ordered:
             print("（暂无任务）")
             return ordered
         print("任务列表：")
-        for t in ordered:
-            status = "[x]" if t.done else "[ ]"
-            print(f"  {status} #{t.id} ({t.priority}) {t.title}")
+        for task in ordered:
+            status = "[x]" if task.done else "[ ]"
+            print(f"  {status} #{task.id} ({task.priority}) {task.title}")
         return ordered
 
 
 if __name__ == "__main__":
     todo = TodoManager()
-
     print("=== 添加任务 ===")
     todo.add("写周报", "high")
     todo.add("买牛奶")
     todo.add("整理书架", "low")
-    todo.add("   ")            # 空标题
-    todo.add("非法任务", "urgent")  # 非法优先级
-
+    todo.add("   ")
+    todo.add("非法任务", "urgent")
     print("\n=== 完成任务 ===")
     todo.complete(2)
-    todo.complete(2)      # 重复完成
-    todo.complete(999)    # 不存在的编号
-    todo.complete("abc")  # 非法类型
-
+    todo.complete(2)
+    todo.complete(999)
+    todo.complete("abc")
     print("\n=== 列出任务 ===")
     todo.list_tasks()

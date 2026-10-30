@@ -15,8 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestExternalVerification(unittest.TestCase):
-    def test_existing_todo_artifact_passes_hidden_contract(self):
-        code = (ROOT / "output" / "final_code.py").read_text(encoding="utf-8")
+    def test_todo_reference_fixture_passes_hidden_contract(self):
+        code = (ROOT / "tests" / "fixtures" / "todo_candidate.py").read_text(encoding="utf-8")
         result = verify_code(code, str(ROOT / "evals" / "tasks" / "todo" / "hidden_tests.py"))
         self.assertTrue(result["verified"], result["run_result"]["output"])
 

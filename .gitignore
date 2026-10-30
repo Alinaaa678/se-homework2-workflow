@@ -1,6 +1,12 @@
+# Local secrets
 config.json
+
+# Python caches
 __pycache__/
+*.py[cod]
 .pytest_cache/
+
+# Generated runtime artifacts
 runs/
 output/
 evals/results/
