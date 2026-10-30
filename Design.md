@@ -1,112 +1,180 @@
-# 设计文档 — Simple Workflow MVP
+# 设计文档 — Verified Workflow
 
-## 1. 核心概念
+## 1. 设计目标
 
-| 概念 | 实现 | 说明 |
+本系统把控制流、上下文、状态和完成证据放在模型之外。模型是节点的一种实现，不能单独决定整个任务已经完成。
+
+```text
+Flow JSON → Engine → Node Executor → LLM / deterministic function
+                 ├─ State + messages + artifact versions
+                 ├─ SQLite checkpoints + JSONL journal
+                 ├─ Acceptance gate + content hashes
+                 └─ Metrics + HTML replay + external evaluation
+```
+
+## 2. 节点与流程
+
+| 节点 | 类型 | 职责 |
 |---|---|---|
-| Workflow | `flows/*.json` | 声明式定义：节点列表 + 带条件的有向边 |
-| Node | flow JSON 中的 `nodes[]` | 声明用哪个 Agent、读哪些状态键、写哪个键 |
-| Agent | `workflow/agents.py` | 提示词驱动的 LLM 调用单元，产出结构化工件 |
-| State（黑板） | `WorkflowState.data` | 所有节点共享的键值空间，数据血缘显式可查 |
-| Message | `WorkflowState.messages` | 每次节点交接都记录信封（from/to/kind/payload/ts） |
-| Edge | flow JSON 中的 `edges[]` | `from → to`，可带 `when` 条件；`to: "END"` 结束流程 |
+| `spec` | 确定性 | 保留原始需求，生成需求 ID、验收范围和规格哈希 |
+| `coder` | LLM | 根据需求生成候选代码 |
+| `reviewer_correctness` | LLM＋执行 | 运行候选代码，对照需求给出结构化审查 |
+| `reviewer_style` | LLM | 只检查风格、可读性和接口一致性 |
+| `acceptance` | LLM＋确定性执行 | 生成候选 unittest，实际执行并以退出码得出结果 |
+| `verdict` | 确定性 | 汇总当前版本的所有证据，给出最终完成状态 |
+| `fixer` | LLM | 根据审查问题与失败测试生成完整修复版 |
 
-### 为什么是「黑板 + 消息」双通道？
+顺序版与并行版共用节点注册表。并行版将两个审查任务放入线程池，主线程汇合后调用 `merge_reviews`；每个任务写不同的黑板键，避免写冲突。
 
-- 黑板解决**状态共享**：节点只声明自己读/写的键（如 reviewer 读 `code`
-  写 `review`），引擎负责注入与落盘，节点之间零耦合——新增节点不需要
-  改任何已有节点。
-- 消息解决**通信留痕**：每次交接都生成信封，评审时能完整回放
-  「谁把什么交给了谁」，消息数本身也是运行指标。
+修复回边受 `max_steps` 和 `max_node_visits` 限制。达到预算后运行失败并保留证据，而不是无限修复。
 
-## 2. 引擎执行模型
+## 3. 上下文、状态与消息
 
+### 3.1 黑板
+
+`WorkflowState.data` 保存 `requirement`、`spec`、`code`、`review`、`acceptance` 和 `verdict`。节点通过 flow JSON 声明输入键和输出键，引擎负责注入与写回。
+
+### 3.2 消息
+
+每次节点交接生成 `from / to / kind / payload / ts` 信封。消息只保留摘要，完整值写入 `artifact` 事件，兼顾时间线可读性与事后审计。
+
+### 3.3 工件版本
+
+工件值保持原类型以兼容节点接口，元数据单独保存在 `WorkflowState.artifacts`：
+
+```json
+{
+  "version": 2,
+  "hash": "sha256:...",
+  "producer": "fixer",
+  "visit": 1,
+  "ts": 0
+}
 ```
-run(initial):
-    current = flow.start
-    loop:
-        守卫检查（总步数 / 单节点访问上限，超限 -> failed 并中止）
-        解析节点输入（从黑板取键）-> 记录 handoff 消息摘要
-        调用 Agent（失败重试 node_retries 次）
-        输出写回黑板 -> 记录 artifact 消息摘要和完整 artifact 事件
-        顺序扫描出边，第一条 when 成立的边决定下一节点
-        无匹配边 -> 隐式 END；条件求值异常 -> failed 并记录 route_error
-    步骤、消息、完整工件和结束状态追加写入 runs/run-<id>.jsonl
+
+字符串按 UTF-8 哈希，结构化对象按规范化 JSON 哈希。审查和验收都记录 `target_code_hash`，验收还记录 `spec_hash`。
+
+## 4. 规格与独立验收
+
+`spec.py` 对编号或项目符号需求生成稳定的 `R001…Rxxx`。它是确定性格式化节点，不声称理解任意自然语言；原始文本始终保留。
+
+`AcceptanceTestAgent` 使用需求和候选代码接口生成 unittest，随后 `run_acceptance`：
+
+1. 在新的临时目录写入 `candidate.py` 与 `test_candidate.py`；
+2. 清除敏感环境变量；
+3. 在新子进程执行 `python -m unittest -v test_candidate`；
+4. 只根据实际退出码设置测试是否通过；
+5. 保存测试代码、输出、退出码、需求 ID、代码哈希和规格哈希。
+
+模型生成测试不代表测试充分，所以系统另有 `evals/` 外部隐藏测试，防止工作流自评代替独立评价。
+
+## 5. 最终完成门禁
+
+`VerdictGate` 要求以下五项同时为真：
+
+```text
+review_passed        审查没有阻断问题
+acceptance_passed    静态检查与独立测试均通过
+review_current       审查对应当前代码哈希
+acceptance_current   验收对应当前代码哈希
+spec_current         验收对应当前规格哈希
 ```
 
-- **条件分支**：`when` 表达式在受限环境（无 builtins，只暴露 `state`
-  和少数安全函数）中求值，例如 `state['review']['passed']`。
-- **循环**：边允许指回前面的节点（`fixer → reviews`），由守卫防止
-  死循环——真实运行中曾触发 5 次上限后优雅中止并报错，而不是挂死。
-- **并行（fork/join）**：`"type": "parallel"` 的节点把多个 Agent 任务
-  放进线程池**并发执行**。设计上把 fork 和 join 融合在一个节点内：
-  所有任务共享同一份输入快照，各自写入**互不相同的**黑板键（校验期
-  强制检查，从源头消除写冲突），join 就是"等所有 future 完成"；
-  随后由具名 reducer（如 `merge_reviews`）把多路输出归并成节点的
-  单一输出键供下游消费。除耗时日志外，同步屏障测试还验证两路会同时
-  进入 `run()`，避免把"有两个任务"误当成"已经并发"。
-- **错误处理**：节点（含并行任务）和出边条件异常均被引擎捕获；节点
-  重试后仍失败则 `status=failed`。错误、完整日志和结束状态会保留，
-  引擎不向调用方抛出执行或路由异常。
+全部满足时返回 `completed_verified`，否则返回 `needs_attention` 和未满足条件。模型自报 `passed=true` 不能绕过这些检查。
 
-## 3. Agent 设计
+这解决两类问题：
 
-| Agent | 输入 | 输出 | 要点 |
-|---|---|---|---|
-| CoderAgent | requirement | code | 只输出 fenced 代码块，解析器容错提取 |
-| CorrectnessReviewAgent | requirement + code | review JSON | **先真实执行代码**（限时子进程，10s 超时），再逐项对照原始需求、代码和运行证据评正确性/健壮性 |
-| StyleReviewAgent | code | review JSON | 不执行代码，只评风格：命名/函数长度/重复代码/文档字符串/接口一致性 |
-| FixAgent | requirement + code + review | code | 按 issue 列表逐一修复，同时以原始需求约束功能不退化 |
+- 程序跑完但没有满足需求；
+- 代码变化后仍使用旧审查或旧验收结果。
 
-两个审查 Agent 在 `reviews` 并行节点中**并发执行**，输出 schema 相同，
-由 `merge_reviews` reducer 汇合：passed 取全体与、issues 合并并标注来源
-（`[correctness]` / `[style]`）、保留正确性审查收集的运行证据。
+## 6. 执行、日志与恢复
 
-Agent 输出的解析（`extract_code` / `extract_json`）都做了防御式处理；
-`normalize_review` 进一步校验 `passed/issues/summary`、问题级别和非空描述。
-最终 verdict 不直接信任模型自报结果：**存在 high/medium 问题必然不通过**，
-模型自报不通过但没有列出问题时也保守判定不通过。reducer 会再次校验，
-防止矛盾回复绕过修复循环。解析或 schema 校验失败按节点失败走重试/中止路径。
+### 6.1 事件日志
 
-## 3.1 可视化回放（viz.py）
+每个事件追加并立即 flush 到 `runs/run-<id>.jsonl`：
 
-每次运行后自动生成 `runs/run-*.html`：自包含页面（内联 SVG + 原生 JS，
-无 CDN、无服务器，断网可开），包含五部分——分层布局的流程图（节点标注
-执行次数、回边虚线、条件标注）、步骤时间线（含并行任务逐路耗时）、
-Agent 消息摘要、**完整工件版本记录**、最终产物查看器。消息摘要保持时间线
-可读，`artifact` 事件则按节点、visit 和状态键保存每轮完整代码与审查结果。
-流程定义嵌入 `run_start`，因此 `python main.py --replay <日志>` 可重新生成
-回放页，并由 `artifacts_from_events` 恢复新版日志中的最终产物。
+```text
+run_start / run_resume
+step / message / artifact
+route_error / run_end
+```
 
-## 4. 从作业 1 复用
+step 包含节点、visit、耗时、状态和 `run_id:node:visit` 幂等标识；artifact 包含完整值、版本、哈希和生产者。
 
-- `workflow/llm.py`：ChatClient 原样复用（指数退避、Retry-After、
-  429/5xx 判定），仅去掉 tool-calling 载荷——Workflow 节点的 Agent
-  是单次结构化调用，不需要工具循环。
-- `workflow/tools.py`：复用 `run_python` 的子进程执行思路；修复了中文
-  Windows 下 GBK 解码崩溃的问题（强制子进程 `PYTHONIOENCODING=utf-8` +
-  父进程 `errors="replace"`），并在执行模型生成代码前清除 API Key、
-  Token、密码等敏感环境变量。它提供超时和临时目录隔离，不是安全沙箱。
-- 作业 1 是「一个 Agent 用工具多轮迭代」，作业 2 是「多个专职 Agent
-  由流程编排协作」——复杂度从 Agent 内部上移到了编排层。
+### 6.2 SQLite 检查点
 
-## 5. 可扩展性
+`runs/workflow.db` 包含：
 
-- **加 Agent**：在 `agents.py` 写一个类（实现 `run(inputs) -> output`），
-  注册进 `default_registry`，再在 flow JSON 里加一个节点即可。
-- **改流程**：只改 JSON。例如默认流程里审查就是并行 stage，要再加一路
-  「安全审查」，只需在 `reviews` 节点的 `tasks` 里加一项，不动引擎。
-- **换模型**：`config.json` 改 `base_url` / `model`，任何 OpenAI 兼容
-  服务（DeepSeek / 通义 / Kimi / 本地 vLLM）都可接入。
+- `runs`：流程定义及哈希、当前节点、前序节点、访问次数、完整状态、错误和日志路径；
+- `artifacts`：逐节点、逐轮次的完整工件历史。
 
-## 6. 已知边界
+初始运行和每个成功节点路由后保存检查点。`resume(run_id)`：
 
-- 条件表达式用受限 `eval` 实现，适合课程项目；生产环境应换成
-  真正的表达式语言（如 CEL/JSONLogic）。
-- review 已有明确的运行时 schema 和 verdict 校验；其他黑板键的类型仍靠
-  节点约定。若扩展为通用工作流平台，可在节点声明中增加 JSON Schema。
-- 子进程执行不是安全沙箱，不能阻止恶意代码访问文件系统或网络；本项目的
-  用途是课程内证据采集，生产环境应使用容器或更严格的隔离机制。
-- 并行粒度是"stage 内多任务"（fork/join 融合），尚不支持跨阶段的
-  自由分叉汇合（如 A→(B∥C)→D 且 B、C 各自是多步子流程）；
-  需要时可把 stage 泛化为子图执行。
+1. 读取最后检查点；
+2. 对比当前 flow 哈希，不一致则拒绝恢复；
+3. 恢复状态、消息、工件版本和访问次数；
+4. 从尚未完成的节点继续；
+5. 已完成的运行直接返回，不重复执行。
+
+语义是 **at-least-once**：已保存检查点的节点不会重跑；崩溃时正在执行的节点可能重试。日志提供幂等标识，但任意外部系统仍需自身实现去重，不能据此宣称 exactly-once。
+
+### 6.3 Replay 与 Resume
+
+- Replay 只读取 JSONL 并生成 HTML。
+- Resume 读取 SQLite 并真正继续执行。
+- Rerun 创建新的 `run_id`，不覆盖旧运行。
+
+## 7. 条件路由
+
+`conditions.py` 使用 AST 白名单解析表达式，只允许：
+
+- 字典／列表取值、常量、布尔运算与比较；
+- 基本算术；
+- `len / any / all / bool / str / int` 白名单函数。
+
+属性访问、导入、推导式和任意函数调用均被拒绝。路由异常转为运行失败并记录 `route_error`。
+
+## 8. 遥测与回放
+
+`ChatClient` 发出 `llm_attempt / llm_retry / llm_response` 事件；`RunMetrics` 线程安全地汇总：
+
+- 请求尝试、成功调用和重试次数；
+- prompt、completion 和 total token；
+- 节点调用次数与累计耗时。
+
+指标进入检查点和 `run_end`。HTML 回放展示流程图、步骤、消息、工件版本与哈希、验收输出、证据检查和运行指标。
+
+## 9. 外部评估
+
+`evals/run_eval.py` 提供四组：
+
+```text
+direct      直接生成
+single      单 Agent + 验收 + 修复
+sequential  顺序 Workflow
+parallel    并行双审 Workflow
+```
+
+每个任务目录同时包含 `requirement.md` 和 `hidden_tests.py`。工作流只能看到需求，评估器最后运行隐藏测试并记录：
+
+- `verified_success_rate`；
+- `false_success_rate`；
+- 耗时、模型调用和 token；
+- 每次运行的原始证据。
+
+判断原则是：先用隐藏测试判断“行不行”，再与最简单基线比较质量、成本和延迟，判断复杂度是否值得。重复运行用于观察波动，不增加独立任务数。
+
+## 10. 可扩展性
+
+- **新增节点**：实现 `run(inputs) -> output`，加入 registry，再修改 flow JSON。
+- **新增并行归并**：注册 reducer，并保证任务输出键不同。
+- **新增评估任务**：增加一个需求与隐藏测试目录，无需改评估器。
+- **替换模型**：修改 OpenAI 兼容服务配置；token 不存在时按 0 记录，不影响执行。
+
+## 11. 已知边界
+
+1. 模型生成的测试可能不完整，外部隐藏测试与人工验收仍不可替代。
+2. 子进程不是安全沙箱；生产环境需要容器或更严格的权限隔离。
+3. SQLite 是本地持久化方案，不是分布式工作流服务。
+4. 并行粒度是 stage 内 fork/join，尚不支持任意子图分叉汇合。
+5. 系统记录副作用幂等标识，但不保证外部副作用自动去重。

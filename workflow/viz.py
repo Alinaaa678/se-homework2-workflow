@@ -54,7 +54,8 @@ TEMPLATE = """<!DOCTYPE html>
   <section><h2>流程图（节点上标注执行次数）</h2><div id="diagram"></div></section>
   <section><h2>步骤时间线</h2><div id="steps"></div></section>
   <section><h2>Agent 间消息记录</h2><div id="messages"></div></section>
-  <section><h2>工件版本记录（完整内容）</h2><div id="artifact-history"></div></section>
+  <section><h2>工件版本记录（完整内容与哈希）</h2><div id="artifact-history"></div></section>
+  <section><h2>运行指标与验收证据</h2><div id="evidence"></div></section>
   <section><h2>最终产物</h2><div id="artifacts"></div></section>
 </main>
 <script>
@@ -131,12 +132,32 @@ document.getElementById("messages").innerHTML =
   msgs.map((m, i) => `<tr><td>${i + 1}</td><td>${esc(m.from)}</td><td>${esc(m.to)}</td><td>${esc(m.kind)}</td><td><code>${esc(m.payload)}</code></td></tr>`).join("") +
   "</table>";
 
-// ---- complete artifact versions, including every repair iteration ----
+// ---- complete artifact versions and content addresses ----
 const artifactEvents = EVENTS.filter(e => e.event === "artifact");
 document.getElementById("artifact-history").innerHTML = artifactEvents.map((a, i) => {
   const value = typeof a.value === "string" ? a.value : JSON.stringify(a.value, null, 2);
-  return `<details><summary>#${i + 1} ${esc(a.node)} · 第${a.visit}次执行 · ${esc(a.key)}</summary><pre>${esc(value)}</pre></details>`;
+  const version = a.version ? ` · v${a.version}` : "";
+  const hash = a.hash ? `<br><small>${esc(a.hash)}</small>` : "";
+  return `<details><summary>#${i + 1} ${esc(a.node)} · 第${a.visit}次执行 · ${esc(a.key)}${version}${hash}</summary><pre>${esc(value)}</pre></details>`;
 }).join("") || "<p>（该日志没有完整工件事件；请使用新版流程重新运行）</p>";
+
+// ---- metrics and independently derived verdict ----
+const endEvent = [...EVENTS].reverse().find(e => e.event === "run_end") || {};
+const metrics = endEvent.metrics || {};
+let evidence = `<table><tr><th>模型调用</th><th>重试</th><th>总 Token</th><th>节点耗时</th></tr>
+  <tr><td>${metrics.llm_calls || 0}</td><td>${metrics.llm_retries || 0}</td><td>${metrics.total_tokens || 0}</td><td>${metrics.node_duration_ms || 0}ms</td></tr></table>`;
+if (ARTIFACTS.verdict) {
+  const v = ARTIFACTS.verdict;
+  evidence += `<p><strong>最终状态：${esc(v.status || "unknown")}</strong>；代码哈希：<code>${esc(v.target_code_hash || "")}</code></p>`;
+  evidence += "<table><tr><th>检查</th><th>结果</th></tr>" + Object.entries(v.checks || {}).map(
+    ([key, ok]) => `<tr><td>${esc(key)}</td><td>${ok ? "✅" : "❌"}</td></tr>`
+  ).join("") + "</table>";
+}
+if (ARTIFACTS.acceptance) {
+  const a = ARTIFACTS.acceptance;
+  evidence += `<details><summary>独立验收：${a.passed ? "通过" : "失败"}</summary><pre>${esc((a.run_result || {}).output || "")}</pre></details>`;
+}
+document.getElementById("evidence").innerHTML = evidence;
 
 // ---- final artifacts ----
 let art = "";

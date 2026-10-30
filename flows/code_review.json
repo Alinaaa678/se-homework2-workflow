@@ -1,31 +1,52 @@
 {
-  "name": "code-review-workflow",
-  "description": "编码 → 审查 → (不通过则)修复 → 再审查 的循环工作流",
-  "start": "coder",
+  "name": "code-review-workflow-verified",
+  "description": "规格 → 编码 → 审查 → 独立验收 → 证据判定 → 有界修复",
+  "start": "spec",
   "nodes": [
+    {
+      "id": "spec",
+      "agent": "spec",
+      "input": {"requirement": "requirement"},
+      "output": "spec"
+    },
     {
       "id": "coder",
       "agent": "coder",
-      "input": {"requirement": "requirement"},
+      "input": {"requirement": "requirement", "spec": "spec"},
       "output": "code"
     },
     {
       "id": "reviewer",
       "agent": "reviewer",
-      "input": {"code": "code", "requirement": "requirement"},
+      "input": {"code": "code", "requirement": "requirement", "spec": "spec"},
       "output": "review"
+    },
+    {
+      "id": "acceptance",
+      "agent": "acceptance",
+      "input": {"code": "code", "requirement": "requirement", "spec": "spec"},
+      "output": "acceptance"
+    },
+    {
+      "id": "verdict",
+      "agent": "verdict",
+      "input": {"code": "code", "review": "review", "acceptance": "acceptance", "spec": "spec"},
+      "output": "verdict"
     },
     {
       "id": "fixer",
       "agent": "fixer",
-      "input": {"code": "code", "review": "review", "requirement": "requirement"},
+      "input": {"code": "code", "review": "review", "acceptance": "acceptance", "requirement": "requirement", "spec": "spec"},
       "output": "code"
     }
   ],
   "edges": [
+    {"from": "spec", "to": "coder"},
     {"from": "coder", "to": "reviewer"},
-    {"from": "reviewer", "to": "END", "when": "state['review']['passed']"},
-    {"from": "reviewer", "to": "fixer", "when": "not state['review']['passed']"},
+    {"from": "reviewer", "to": "acceptance"},
+    {"from": "acceptance", "to": "verdict"},
+    {"from": "verdict", "to": "END", "when": "state['verdict']['passed']"},
+    {"from": "verdict", "to": "fixer", "when": "not state['verdict']['passed']"},
     {"from": "fixer", "to": "reviewer"}
   ]
 }

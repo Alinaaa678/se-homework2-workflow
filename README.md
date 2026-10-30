@@ -1,97 +1,160 @@
-# Simple Workflow MVP — 软件工程 Homework 2
+# Verified Workflow — 软件工程 Homework 2
 
-一个**多 Agent 协作工作流**：`编码 Agent → 并行双路审查（正确性 + 风格）→ （任一不通过则）修复 → 再审查`，
-端到端地把一句自然语言需求变成一份通过审查、可直接运行的 Python 代码。
+一个可运行、可恢复、可评估的多 Agent 工作流。系统将一句自然语言需求转换为 Python 代码，并经过规格追踪、双路审查、独立测试执行和确定性完成判定。
 
-## 流程图
+默认流程：
 
-```mermaid
-flowchart TD
-    coder[coder 编码Agent]
-    reviews[reviews 并行审查: 正确性 + 风格]
-    fixer[fixer 修复Agent]
-    coder --> reviews
-    reviews -->|passed| END((END))
-    reviews -->|not passed| fixer
-    fixer --> reviews
+```text
+Spec → Coder → 并行双路 Review → Acceptance Test → Verdict
+                                      ↑                  │
+                                      └──── Fixer ←──────┘
+                                      （不通过且有剩余预算）
 ```
 
-（`python main.py --viz` 打印上图源码；`python main.py` 运行后还会在 `runs/` 生成
-**自包含 HTML 回放页**——流程图、步骤时间线、消息摘要、完整工件版本和最终产物，浏览器打开即可，无需联网）
+模型负责生成代码、审查意见和候选测试；**最终是否完成由程序根据当前代码版本、审查结果和测试退出码判定**。
 
-## 对照作业要求
+## 课程要求对照
 
-| 要求 | 实现 |
+| 课程要求 | 实现情况 |
 |---|---|
-| 至少 2 个 Agent 协作 | 4 个：Coder / CorrectnessReviewer / StyleReviewer / Fixer |
-| Agent 间消息传递或状态共享 | 两者都有：共享黑板 `WorkflowState.data` + 每次交接记录为消息信封（并写入 JSONL 日志） |
-| 顺序执行流程控制 | 声明式 JSON 流程定义（`flows/`），引擎按边推进 |
-| 条件分支、循环（推荐） | 边可带 `when` 条件表达式；`fixer → reviews` 回边构成修复-复审循环 |
-| **并行执行**（推荐） | 并行 stage：正确性审查与风格审查**并发执行**（fork/join 融合为一个节点），`merge_reviews` reducer 汇合双路结论；同步屏障测试证明两路会同时进入执行 |
-| **可视化**（推荐，可选） | `runs/run-*.html` 离线回放页：SVG 流程图 + 步骤时间线 + 消息摘要 + **完整工件版本记录** + 最终产物；`--replay` 可从历史日志恢复产物 |
-| 执行日志与状态追踪（推荐） | 每步写入 `runs/run-*.jsonl`；消息保存交接摘要，`artifact` 事件按节点和轮次保存**完整代码与审查结果** |
-| 错误处理与恢复（推荐） | 节点失败自动重试；LLM 调用指数退避；并行失败、路由异常和循环超限均记录并优雅中止 |
-| 复用项目 1（推荐） | `workflow/llm.py` 复用作业 1 的 ChatClient；`workflow/tools.py` 复用「运行代码验证」思路，正确性审查 Agent 会**真实执行**被审代码 |
-| 需求验收与审查可信度（额外） | 正确性审查和修复均读取原始需求；校验 review schema，`high/medium` 问题强制阻断；31 项测试中含 5 项 Todo 原始需求验收测试 |
+| 至少 2 个 Agent 协作 | Coder、CorrectnessReviewer、StyleReviewer、AcceptanceTest、Fixer 五个模型节点 |
+| Agent 间消息传递或状态共享 | 共享黑板、消息信封、完整工件日志 |
+| 顺序执行 | 声明式 JSON 节点与边 |
+| 条件分支、循环 | Verdict 条件边与 Fixer 回边；总步数、单节点访问上限 |
+| 并行执行 | 正确性与风格审查真实 fork/join，reducer 汇合 |
+| 可视化 | Mermaid 流程图、自包含 HTML 运行回放；不是拖拽编辑器 |
+| 执行日志与状态追踪 | JSONL 只追加日志、SQLite 检查点、工件版本和哈希 |
+| 错误处理与恢复 | 节点重试、LLM 退避、超时、异常落盘、`--resume` 跨进程恢复 |
+| 复用项目 1 | 复用 OpenAI 兼容客户端、工具执行和超时处理经验 |
+| 可扩展性 | 注册式 Agent、声明式流程、独立 reducer、外部评估任务目录 |
+| 文档 | README、Design、流程图和离线演示 |
+
+## 本次增强
+
+- **规格追踪**：把编号需求转换为 `R001…Rxxx`，保存规格哈希。
+- **独立验收**：测试由模型候选生成，在全新子进程中执行，结果只取退出码。
+- **确定性完成门禁**：审查通过、验收通过、代码哈希一致、规格哈希一致才可完成。
+- **版本化证据**：每个工件记录生产者、版本和内容哈希，旧审查不能授权新代码。
+- **持久恢复**：SQLite 保存运行状态、当前节点、访问次数和工件；支持失败后续跑。
+- **可观测性**：记录节点耗时、模型调用、重试、输入／输出／总 token。
+- **外部评估**：四种方案对照，使用 Workflow 看不见的隐藏测试计算最终通过率与误报成功率。
+- **安全路由**：条件表达式使用 AST 白名单，不再直接调用 Python `eval`。
 
 ## 快速开始
 
+环境要求：Python 3.9+，仅使用标准库。
+
 ```bash
-# 1. 配置（与作业 1 相同）
+# 1. 配置任意 OpenAI 兼容服务
 cp config.example.json config.json   # 填入 base_url / api_key / model
 
-# 2. 端到端运行（默认并行流程 + samples/requirement.md）
+# 2. 离线端到端演示，不需要 API Key
+python main.py --demo
+
+# 3. 使用真实模型运行
 python main.py
 
-# 3. 换需求 / 换流程
+# 4. 换需求或顺序流程
 python main.py --requirement my_requirement.md
-python main.py --flow flows/code_review.json   # 顺序版流程（单审查员）
+python main.py --flow flows/code_review.json
 
-# 4. 流程图与回放
-python main.py --viz                            # Mermaid 源码
-python main.py --replay runs/run-XXXX.jsonl     # 历史日志 → HTML 回放页
-
-# 5. 离线演示 / 自测（无需 API Key）
-python main.py --demo                         # 演示产物写入 output/demo_code.py，不覆盖真实产物
-python -m unittest discover -s tests -v        # 31 项测试，含 5 项最终 Todo 产物验收
+# 5. 输出 Mermaid 流程定义
+python main.py --viz
 ```
 
-零第三方依赖，Python 3.9+ 即可运行。
+只有 `verdict.status == completed_verified` 时，真实运行才写入 `output/final_code.py`；离线演示写入 `output/demo_code.py`。
 
-## 一次真实运行记录（并行版）
+### 恢复、检查与回放
 
+```bash
+# 从最后一个成功检查点继续；flow 哈希变化时拒绝恢复
+python main.py --resume <run-id>
+
+# 查看状态、当前节点、访问次数、最终证据和运行指标
+python main.py --inspect <run-id>
+
+# 仅生成历史回放，不重新执行节点
+python main.py --replay runs/run-<run-id>.jsonl
 ```
-流程: code-review-workflow-parallel
-  [step] coder (visit 1) -> code  3595ms
-  [step] reviews (visit 1) -> review  2386ms
-      └─ 并行 correctness(reviewer_correctness) 862ms
-      └─ 并行 style(reviewer_style) 2382ms      ← 总耗时≈较慢一路，确为并发
-状态: success
-审查结论: ✅ 通过（正确性确认全部需求实现；风格给出 6 条 low 级建议）
-最终代码已写入: output/final_code.py（31 项测试通过，含 5 项需求验收）
-对应证据: runs/run-20261025-143429-7f64bb.jsonl / .html
+
+`runs/workflow.db` 保存检查点，`runs/run-*.jsonl` 保存事件，`runs/run-*.html` 用于离线查看流程、消息、工件版本、验收证据和指标。
+
+### 测试
+
+```bash
+python -m unittest discover -s tests -v
 ```
+
+当前共 **42 项离线测试**，覆盖：
+
+- 顺序、条件分支、循环和真实并发；
+- 解析器、review schema、reducer 和需求传递；
+- 独立测试成功／失败、旧证据拒绝和规格稳定性；
+- SQLite 崩溃恢复、已完成节点不重跑、流程变更拒绝恢复；
+- 安全条件表达式、LLM token 采集；
+- 外部隐藏测试与误报成功统计；
+- Todo 最终产物的需求验收。
+
+## 对照评估
+
+```bash
+# 使用真实模型，可能产生 API 费用
+python -m evals.run_eval --arm all --repeat 3
+
+# 只评估一个方案或一个任务
+python -m evals.run_eval --arm parallel --task todo --repeat 1
+```
+
+四个方案：
+
+| 方案 | 用途 |
+|---|---|
+| `direct` | 直接生成，提供最低成本基线 |
+| `single` | 单 Agent 生成、验收、修复闭环 |
+| `sequential` | 顺序审查工作流 |
+| `parallel` | 当前并行双审工作流 |
+
+评估器运行 `evals/tasks/*/hidden_tests.py`，不采用 Workflow 自报分数，输出：
+
+- 独立验收通过率；
+- 自报成功但隐藏测试失败的误报成功率；
+- 平均耗时、模型调用与 token；
+- 每个任务、每次重复的原始证据。
+
+仓库附带的 3 个任务用于验证评估框架，**不构成有统计意义的模型基准**。正式比较应增加任务数量，并保持模型、预算和任务集合一致。
 
 ## 项目结构
 
-```
-├── main.py               # CLI 入口（run / --flow / --viz / --replay / --demo）
+```text
+├── main.py                     # run / resume / inspect / replay / viz / demo
+├── flows/                      # 顺序与并行的已验证流程
 ├── workflow/
-│   ├── engine.py         # 声明式流程 + 条件边 + 并行 stage + 循环守卫 + 完整工件日志
-│   ├── state.py          # 共享状态：黑板 + Agent 消息日志
-│   ├── agents.py         # 4 个 Agent + review schema 校验 + merge_reviews reducer
-│   ├── llm.py            # OpenAI 兼容客户端（复用自作业 1，含重试）
-│   ├── tools.py          # 限时子进程（清除敏感环境变量；非安全沙箱）
-│   └── viz.py            # 离线 HTML 回放：流程、时间线、消息、工件版本、最终产物
-├── flows/
-│   ├── code_review_parallel.json  # 默认流程：并行双路审查
-│   └── code_review.json           # 顺序版流程（单审查员，用于对照）
-├── samples/requirement.md         # 示例需求
-├── tests/
-│   ├── test_workflow.py           # 解析器、reducer、顺序流、并行流、回放
-│   ├── test_engine_robustness.py  # 真实并发、异常、schema、需求传递、工件恢复
-│   └── test_todo_acceptance.py    # 当前最终 Todo 产物的 5 项需求验收
-└── runs/                 # 每次运行的 JSONL 日志 + HTML 回放页
+│   ├── engine.py               # 确定性执行、并行、路由、检查点
+│   ├── agents.py               # LLM 节点与 VerdictGate
+│   ├── state.py                # 黑板、消息、工件版本
+│   ├── store.py                # SQLite runs / artifacts
+│   ├── artifacts.py            # 内容哈希
+│   ├── spec.py                 # 需求 ID 与规格版本
+│   ├── conditions.py           # AST 白名单条件表达式
+│   ├── metrics.py              # LLM 与节点指标
+│   ├── tools.py                # 执行、静态检查、验收测试
+│   ├── llm.py                  # 重试与遥测事件
+│   └── viz.py                  # 离线 HTML 回放
+├── evals/
+│   ├── tasks/                  # 需求与隐藏测试
+│   ├── verify.py               # 独立验收
+│   └── run_eval.py             # 四方案对照
+├── tests/                      # 42 项离线测试
+├── samples/                    # 示例需求
+├── output/                     # 经验证的代码产物
+└── runs/                       # 日志、SQLite、HTML 回放
 ```
 
-设计取舍与扩展方法见 [Design.md](Design.md)。
+## 已知边界
+
+- 恢复采用 **at-least-once**：已保存检查点的节点不重跑，崩溃时正在执行的节点可能重试；不宣称所有外部副作用 exactly-once。
+- 模型生成的验收测试可能遗漏需求，因此仍需外部隐藏测试或人工评审判断真实质量。
+- 子进程有超时、临时目录和敏感环境变量清理，但不是安全沙箱，不能阻止恶意代码访问文件系统或网络。
+- SQLite 适用于本地课程项目，不提供分布式调度；并行粒度仍是 stage 内 fork/join。
+
+详细设计见 [Design.md](Design.md)。

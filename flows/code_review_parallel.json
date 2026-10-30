@@ -1,12 +1,18 @@
 {
-  "name": "code-review-workflow-parallel",
-  "description": "编码 → 并行双路审查（正确性+风格）→ (任一不通过则)修复 → 再审查",
-  "start": "coder",
+  "name": "code-review-workflow-parallel-verified",
+  "description": "规格 → 编码 → 并行双路审查 → 独立验收 → 证据判定 → 有界修复",
+  "start": "spec",
   "nodes": [
+    {
+      "id": "spec",
+      "agent": "spec",
+      "input": {"requirement": "requirement"},
+      "output": "spec"
+    },
     {
       "id": "coder",
       "agent": "coder",
-      "input": {"requirement": "requirement"},
+      "input": {"requirement": "requirement", "spec": "spec"},
       "output": "code"
     },
     {
@@ -16,13 +22,13 @@
         {
           "id": "correctness",
           "agent": "reviewer_correctness",
-          "input": {"code": "code", "requirement": "requirement"},
+          "input": {"code": "code", "requirement": "requirement", "spec": "spec"},
           "output": "review_correctness"
         },
         {
           "id": "style",
           "agent": "reviewer_style",
-          "input": {"code": "code"},
+          "input": {"code": "code", "spec": "spec"},
           "output": "review_style"
         }
       ],
@@ -30,16 +36,31 @@
       "output": "review"
     },
     {
+      "id": "acceptance",
+      "agent": "acceptance",
+      "input": {"code": "code", "requirement": "requirement", "spec": "spec"},
+      "output": "acceptance"
+    },
+    {
+      "id": "verdict",
+      "agent": "verdict",
+      "input": {"code": "code", "review": "review", "acceptance": "acceptance", "spec": "spec"},
+      "output": "verdict"
+    },
+    {
       "id": "fixer",
       "agent": "fixer",
-      "input": {"code": "code", "review": "review", "requirement": "requirement"},
+      "input": {"code": "code", "review": "review", "acceptance": "acceptance", "requirement": "requirement", "spec": "spec"},
       "output": "code"
     }
   ],
   "edges": [
+    {"from": "spec", "to": "coder"},
     {"from": "coder", "to": "reviews"},
-    {"from": "reviews", "to": "END", "when": "state['review']['passed']"},
-    {"from": "reviews", "to": "fixer", "when": "not state['review']['passed']"},
+    {"from": "reviews", "to": "acceptance"},
+    {"from": "acceptance", "to": "verdict"},
+    {"from": "verdict", "to": "END", "when": "state['verdict']['passed']"},
+    {"from": "verdict", "to": "fixer", "when": "not state['verdict']['passed']"},
     {"from": "fixer", "to": "reviews"}
   ]
 }

@@ -57,3 +57,57 @@ def run_python(code: str, timeout: int = 10) -> str:
         out = out[:4000] + "\n...[输出已截断]"
     header = f"[exit_code={proc.returncode}]"
     return f"{header}\n{out.strip() or '(无输出)'}"
+
+
+def static_check(code: str) -> Dict[str, object]:
+    """Compile candidate source without executing it."""
+    try:
+        compile(code, "candidate.py", "exec")
+    except (SyntaxError, ValueError, TypeError) as exc:
+        return {"passed": False, "error": str(exc)}
+    return {"passed": True, "error": None}
+
+
+def run_acceptance(code: str, test_code: str, timeout: int = 15) -> Dict[str, object]:
+    """Run independent unittest code against candidate.py in a fresh process.
+
+    The returned verdict is derived only from the test process exit code. The
+    LLM may propose tests, but it cannot directly mark those tests as passed.
+    This remains time-boxed process isolation, not a security sandbox.
+    """
+    with tempfile.TemporaryDirectory(prefix="wf_accept_") as tmp:
+        candidate = os.path.join(tmp, "candidate.py")
+        tests = os.path.join(tmp, "test_candidate.py")
+        with open(candidate, "w", encoding="utf-8") as handle:
+            handle.write(code)
+        with open(tests, "w", encoding="utf-8") as handle:
+            handle.write(test_code)
+        env = _scrub_sensitive_env(dict(os.environ))
+        env["PYTHONIOENCODING"] = "utf-8"
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "unittest", "-v", "test_candidate"],
+                capture_output=True,
+                timeout=timeout,
+                cwd=tmp,
+                env=env,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "passed": False,
+                "exit_code": None,
+                "output": f"[TIMEOUT] 验收测试超过 {timeout}s，已终止。",
+            }
+        except Exception as exc:  # pragma: no cover - defensive
+            return {"passed": False, "exit_code": None, "output": f"[ERROR] {exc}"}
+
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if len(output) > 6000:
+        output = output[:6000] + "\n...[输出已截断]"
+    return {
+        "passed": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "output": output or "(无输出)",
+    }

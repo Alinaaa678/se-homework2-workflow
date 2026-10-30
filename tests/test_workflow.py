@@ -37,6 +37,13 @@ class FakeClient:
         system = messages[0]["content"]
         if "工程师" in system and "修复" in system:
             content = "```python\ndef fixed():\n    return 42\n```"
+        elif "独立测试工程师" in system:
+            content = (
+                "```python\nimport unittest\n\n"
+                "class Acceptance(unittest.TestCase):\n"
+                "    def test_contract(self):\n"
+                "        self.assertTrue(True)\n```"
+            )
         elif "风格审查员" in system:
             self.style_calls += 1
             content = json.dumps({
@@ -117,6 +124,9 @@ class TestSequentialWorkflow(unittest.TestCase):
         # coder 1 次，reviewer 2 次（不通过 -> 通过），fixer 1 次
         self.assertEqual(self.client.review_calls, 2)
         self.assertEqual(state.get("review")["passed"], True)
+        self.assertEqual(state.get("verdict")["status"], "completed_verified")
+        self.assertTrue(state.get("acceptance")["passed"])
+        self.assertEqual(len(state.get("spec")["requirements"]), 1)
         self.assertIn("fixed", state.get("code"))
         # 消息传递留痕：handoff + artifact 消息都存在
         kinds = {m["kind"] for m in state.messages}
@@ -129,7 +139,7 @@ class TestSequentialWorkflow(unittest.TestCase):
         with open(log_path, encoding="utf-8") as f:
             events = [json.loads(line) for line in f]
         steps = [e for e in events if e["event"] == "step"]
-        self.assertEqual(len(steps), 4)
+        self.assertEqual(len(steps), 9)
         self.assertTrue(all(s["status"] == "ok" for s in steps))
         self.assertEqual(events[-1]["event"], "run_end")
         # run_start 携带完整流程定义（供离线回放），消息也写入日志
@@ -236,19 +246,22 @@ class TestParallelWorkflow(unittest.TestCase):
     def test_parallel_validation(self):
         with open(PAR_FLOW, encoding="utf-8") as f:
             base = json.load(f)
+        parallel_index = next(
+            i for i, node in enumerate(base["nodes"]) if node.get("type") == "parallel"
+        )
         # 输出键冲突
         dup = json.loads(json.dumps(base))
-        dup["nodes"][1]["tasks"][1]["output"] = "review_correctness"
+        dup["nodes"][parallel_index]["tasks"][1]["output"] = "review_correctness"
         with self.assertRaises(FlowError):
             WorkflowEngine(dup, default_registry(FakeClient()), reducers=REDUCERS)
         # 未注册 reducer
         bad = json.loads(json.dumps(base))
-        bad["nodes"][1]["reduce"] = "不存在的reducer"
+        bad["nodes"][parallel_index]["reduce"] = "不存在的reducer"
         with self.assertRaises(FlowError):
             WorkflowEngine(bad, default_registry(FakeClient()), reducers=REDUCERS)
         # 任务数不足
         few = json.loads(json.dumps(base))
-        few["nodes"][1]["tasks"] = few["nodes"][1]["tasks"][:1]
+        few["nodes"][parallel_index]["tasks"] = few["nodes"][parallel_index]["tasks"][:1]
         with self.assertRaises(FlowError):
             WorkflowEngine(few, default_registry(FakeClient()), reducers=REDUCERS)
 
